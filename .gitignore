@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Agent session logs and local-only settings, not project files
+audit.jsonl
+local-agent-mode-sessions/
+.claude/settings.local.json

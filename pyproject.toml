@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "padmode"
+version = "0.1.0"
+description = "Console mode for the Linux desktop you already run: drive it with a gamepad."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "kelebek" }]
+keywords = ["gamepad", "controller", "evdev", "console", "couch", "linux"]
+classifiers = [
+    "Environment :: X11 Applications",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Utilities",
+]
+
+# Core runtime is stdlib + python-evdev. Nothing else, ever, without a strong
+# reason (see CLAUDE.md §2). playerctl/wpctl are external *commands*, probed at
+# runtime -- deliberately not Python dependencies.
+dependencies = ["evdev>=1.6"]
+
+[project.scripts]
+padmode = "padmode.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/kelebek/padmode"
+Issues = "https://github.com/kelebek/padmode/issues"
+
+[tool.setuptools.packages.find]
+include = ["padmode*"]
+
+# Tests use stdlib unittest, not pytest: `python -m unittest discover`.
+# Keeps the "no dependencies" promise true for contributors too.

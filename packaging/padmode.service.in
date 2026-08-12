@@ -1,0 +1,31 @@
+[Unit]
+Description=padmode -- gamepad console mode
+Documentation=https://github.com/kelebek/padmode
+# Ordering only, not a requirement: padmode tolerates starting before the
+# session is fully up, and it retries until a gamepad appears.
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=@PADMODE@ run
+Restart=always
+RestartSec=2
+
+# Deliberately light hardening. padmode never runs as root -- reading the pad
+# needs the 'input' group and nothing else -- so the usual sandboxing knobs buy
+# very little here, and several of them are outright traps for this app:
+#
+#   ProtectHome / ProtectSystem : from v0.3 padmode launches user applications
+#       (overlay mode). Children inherit the service's namespace, so a
+#       read-only home would break every app it starts.
+#   PrivateTmp                  : the X11 backend needs /tmp/.X11-unix.
+#
+# NoNewPrivileges is safe for children and is the one that actually matters.
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+
+[Install]
+# default.target rather than graphical-session.target: it is reached in every
+# user session, including ones where the desktop never activates the graphical
+# target. Starting early costs nothing here.
+WantedBy=default.target

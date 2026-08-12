@@ -1,0 +1,13 @@
+# padmode -- device access
+#
+# Reading gamepads (/dev/input/event*) already works for members of the 'input'
+# group on every mainstream distro. That is a distro default; this file does not
+# change it, and padmode never needs root.
+#
+# What this rule covers is /dev/uinput, which padmode uses from v0.2 onward to
+# create its own virtual mouse and keyboard for desktop mode. It is installed
+# now, ahead of the feature that needs it, for one practical reason: group
+# membership only takes effect after a full logout. Doing it once today saves
+# you a second logout later.
+
+KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"
