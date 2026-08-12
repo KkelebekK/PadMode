@@ -8,11 +8,13 @@ without leaving the game. The pad still belongs to the game the rest of the
 time.
 
 Then press Guide + L3 and the pad becomes a mouse and keyboard, so you can
-drive the whole desktop from the couch without reaching for either.
+drive the whole desktop from the couch without reaching for either. Or bind a
+button to an app and have it come up *over* your game, with one press to send
+you straight back.
 
-> **Status: v0.2.** Media and volume control plus a full desktop mode. Still
-> **no compositor dependency** — everything here works on every Linux desktop.
-> In-game overlays and gamepad unlock are on the roadmap below.
+> **Status: v0.3.** Media and volume control, a full desktop mode, and app
+> overlays that return you to the game. Everything except overlays still works
+> on every Linux desktop with no compositor involvement at all.
 
 `padmode` is a provisional name and may change before 1.0.
 
@@ -29,23 +31,26 @@ remapper. It does a few specific things and stays out of the way.
 
 ## What works where
 
-v0.1 needs no window management at all, so it runs anywhere. Later versions
-need to activate windows, which Wayland deliberately does not expose to
-ordinary clients:
+Media keys and desktop mode need no window management at all, so they run
+anywhere. Overlays have to activate windows, which Wayland deliberately does
+not expose to ordinary clients:
 
-| Desktop | v0.2 (this release) | v0.3+ (overlays) |
+| Desktop | Media + desktop mode | Overlays |
 |---|---|---|
-| KDE Plasma (Wayland) | Yes | Yes |
-| Any X11 desktop | Yes | Yes |
+| KDE Plasma (Wayland) | Yes | Yes — needs `kdotool` |
+| Any X11 desktop | Yes | Yes — needs `xdotool` |
 | Hyprland / sway | Yes | Community backend |
 | GNOME (Wayland) | Yes | **No** — see below |
 | GNOME (X11) | Yes | Yes |
 
 GNOME on Wayland refuses window activation requests from clients, by design.
-Overlay and return-to-game cannot be implemented there without a GNOME Shell
-extension, which is out of scope. Everything in v0.2 still works fine — the
+Overlays and return-to-game cannot be implemented there without a GNOME Shell
+extension, which is out of scope. Everything else still works fine — the
 virtual mouse and keyboard are ordinary input devices, indistinguishable from
-real hardware, so no compositor gets a say in them.
+real hardware, so no compositor gets a say in them. padmode says so once at
+startup and disables only the overlay buttons.
+
+`padmode windows` tells you what it found on your system.
 
 ## Requirements
 
@@ -55,6 +60,7 @@ real hardware, so no compositor gets a say in them.
 - Write access to `/dev/uinput` for desktop mode — the installer's udev rule
   handles this
 - Optional: `playerctl` for media keys, `wpctl` (PipeWire) for volume and mic
+- Optional, for overlays only: `kdotool` on KDE Wayland, `xdotool` on X11
 
 Missing optional tools disable only the bindings that need them. No
 `playerctl`? Volume control still works, and padmode says so once at startup
@@ -125,12 +131,39 @@ Adjust with `pointer_speed`, `dead_zone` and `curve` in config.
 While desktop mode is active the pad is held exclusively, so nothing leaks
 through to whatever is running underneath. Leaving hands it straight back.
 
+### Overlays
+
+An overlay is an app on a button. Press it and the app comes up over whatever
+you were doing, with the pad driving it; press the exit button and you are back
+in the game, pad and all.
+
+```toml
+[overlays.chat]
+class = "discord"          # matched against the window class
+command = ["discord"]      # started if it isn't running yet
+
+[bindings]
+B = "overlay.chat"         # hold Guide, press B
+```
+
+That is the whole feature. If the app is already running it is raised; if it
+isn't, padmode starts it and waits for its window. Leaving puts focus back on
+the window you came from — and hands the pad back *first*, so a button you are
+still holding cannot leak through into your game.
+
+Don't know what to put in `class`? Focus the app and run `padmode windows`.
+
+Overlays are the one part of padmode that needs cooperation from your desktop.
+See [what works where](#what-works-where), and note that a game in **exclusive
+fullscreen cannot be overlaid** by anything — use borderless windowed.
+
 Useful commands:
 
 ```bash
 padmode devices   # which gamepads were found, and which one is used
 padmode config    # effective configuration after defaults and overrides
 padmode actions   # everything you can bind, and whether its tool is installed
+padmode windows   # the window backend, and whether each overlay can be found
 ```
 
 Logs go to the journal: `journalctl --user -u padmode -f`
@@ -186,6 +219,23 @@ R3 = "key.super"       # hold a modifier for as long as you hold the button
 # scrolls without stepping.
 RS_RIGHT = "key.tab"
 RS_LEFT = "key.shift+tab"
+
+[windows]
+backend = "auto"       # auto | kwin | x11 | none. Autodetected from the session
+settle = 0.7           # pause between handing the pad back and refocusing the
+                       # game, so a button you are still holding can't leak in
+launch_timeout = 10    # how long to wait for a launched app's window
+park_pointer = false   # move the cursor onto the overlay. Only worth enabling
+                       # under focus-follows-mouse, where the cursor sitting
+                       # over the game can pull focus off the overlay
+
+[overlays.chat]
+class = "discord"          # regex, case-insensitive, matched on window class
+command = ["discord"]      # optional: without it, only raises a running app
+
+[overlays.browser]
+class = "firefox"
+command = ["firefox"]
 ```
 
 Button names accept the obvious spellings: `RB` or `R1`, `GUIDE` or `MODE` or
@@ -215,20 +265,30 @@ and quietly ignoring half your bindings.
   repeat.
 - **One gamepad.** Multi-pad support isn't implemented; the first matching
   device wins.
+- **Exclusive-fullscreen games cannot be overlaid.** Nothing can draw over
+  them; that is what exclusive means. Use borderless windowed.
+- **Overlays need a window backend.** No `kdotool`/`xdotool`, or GNOME on
+  Wayland, means the overlay buttons do nothing and say so once at startup.
+  Nothing else is affected.
+- **`park_pointer` is unproven.** No compositor here can place the cursor, so
+  padmode drives its own pointer and corrects until it arrives. It is off by
+  default and gives up rather than fighting; if you use focus-follows-mouse and
+  it lands short, that is why.
 
 ## Roadmap
 
 | Version | Adds | Needs a compositor? |
 |---|---|---|
 | ✅ v0.1 | Media, volume, mic while holding Guide | No |
-| ✅ **v0.2** | Virtual mouse/keyboard, desktop mode | No |
-| v0.3 | Window backends, in-game overlays, return-to-game | KDE + X11 |
+| ✅ v0.2 | Virtual mouse/keyboard, desktop mode | No |
+| ✅ **v0.3** | Window backends, in-game overlays, return-to-game | KDE + X11 |
 | v0.4 | Frontend integration, library metadata generators | KDE + X11 |
 | v0.5 | Gamepad unlock (opt-in, off by default) | Screensaver D-Bus |
 
-v0.1 and v0.2 are deliberately useful on their own, on any desktop. Everything
-from v0.3 onward needs to activate windows, which is where Wayland starts
-having opinions.
+v0.1 and v0.2 are deliberately useful on their own, on any desktop. Overlays
+are the first feature that has to activate a window, which is where Wayland
+starts having opinions — so they are additive, and their absence costs you
+nothing else.
 
 ## Development
 

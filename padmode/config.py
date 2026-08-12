@@ -18,6 +18,7 @@ from typing import Any
 
 from . import buttons
 from .actions.builtin import ACTIONS
+from .windows import backend_names
 
 
 class ConfigError(Exception):
@@ -38,8 +39,19 @@ DEFAULT_BINDINGS: dict[str, str] = {
 DEFAULT_MODIFIER = "GUIDE"
 DEFAULT_VOLUME_STEP = 5
 
-#: A binding value is either a built-in action id, or an argv list to exec.
+#: A binding value is either a built-in action id, an argv list to exec, or
+#: ``overlay.<name>`` naming a declared overlay.
 Binding = str | list[str]
+
+#: Marks a binding as "open this overlay" rather than "run this action".
+OVERLAY_PREFIX = "overlay."
+
+
+def overlay_name(binding: Binding) -> str | None:
+    """The overlay a binding opens, or None if it is an ordinary action."""
+    if isinstance(binding, str) and binding.startswith(OVERLAY_PREFIX):
+        return binding[len(OVERLAY_PREFIX):]
+    return None
 
 #: Desktop-mode defaults: gamepad drives the pointer and keyboard.
 DEFAULT_DESKTOP_BINDINGS: dict[str, str] = {
@@ -106,6 +118,40 @@ class DesktopConfig:
 
 
 @dataclass(frozen=True)
+class Overlay:
+    """An app that can be raised over whatever is running, and returned from."""
+
+    #: The key under ``[overlays]``; what a binding refers to.
+    name: str
+    #: Matched against the window class, case-insensitively, as a regex.
+    window_class: str
+    #: Argv to start the app if no matching window exists. Without one, the
+    #: overlay can only raise an app that is already running.
+    command: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class WindowsConfig:
+    """Window backend selection, and the timing overlay mode depends on."""
+
+    #: ``auto``, a backend name, or ``none``. See :mod:`padmode.windows`.
+    backend: str = "auto"
+    #: Seconds between releasing the pad and re-activating the window we came
+    #: from. Gotcha §6.1: release the grab *before* the previous window regains
+    #: focus, or a still-held return button leaks a raw gamepad event into it.
+    #: The setup this replaces used 0.7s and it crashed a frontend without one.
+    settle: float = 0.7
+    #: How long to wait for a launched app's window to appear before giving up.
+    #: Cold-starting an Electron app takes seconds, so this is generous.
+    launch_timeout: float = 10.0
+    #: Move the cursor onto the overlay window (gotcha §6.3). Off by default:
+    #: it only matters under focus-follows-mouse, which is not the default on
+    #: any desktop we support, and it is the one thing here that moves the
+    #: pointer without the user asking.
+    park_pointer: bool = False
+
+
+@dataclass(frozen=True)
 class Config:
     """Fully resolved configuration. Immutable once built."""
 
@@ -120,10 +166,20 @@ class Config:
     #: Canonical button name -> action id or argv list.
     bindings: dict[str, Binding] = field(default_factory=lambda: dict(DEFAULT_BINDINGS))
     desktop: DesktopConfig = field(default_factory=DesktopConfig)
+    windows: WindowsConfig = field(default_factory=WindowsConfig)
+    #: Overlay name -> definition. Empty by default: an overlay needs an app,
+    #: and we do not know which apps anyone has.
+    overlays: dict[str, Overlay] = field(default_factory=dict)
 
     def action_for(self, name: str) -> Binding | None:
         """Binding attached to a canonical button name, if any."""
         return self.bindings.get(name)
+
+    def overlay_for(self, name: str) -> Overlay | None:
+        """The overlay a button opens, if it is bound to one."""
+        binding = self.bindings.get(name)
+        overlay = overlay_name(binding) if binding is not None else None
+        return self.overlays.get(overlay) if overlay is not None else None
 
 
 def default_path() -> Path:
@@ -186,9 +242,110 @@ def parse(data: dict[str, Any]) -> Config:
             raise ConfigError("general.volume_step must be an integer from 1 to 100")
         cfg = replace(cfg, volume_step=step)
 
-    cfg = replace(cfg, bindings=_parse_bindings(_table(data, "bindings"), cfg.modifier))
+    # Overlays first: a binding may name one, so they have to exist before the
+    # bindings that refer to them can be checked.
+    cfg = replace(
+        cfg,
+        windows=_parse_windows(_table(data, "windows")),
+        overlays=_parse_overlays(_table(data, "overlays")),
+    )
+    cfg = replace(
+        cfg,
+        bindings=_parse_bindings(_table(data, "bindings"), cfg.modifier, cfg.overlays),
+    )
     cfg = replace(cfg, desktop=_parse_desktop(_table(data, "desktop"), cfg))
     return cfg
+
+
+def _parse_windows(table: dict[str, Any]) -> WindowsConfig:
+    windows = WindowsConfig()
+    _reject_unknown(table, {"backend", "settle", "launch_timeout", "park_pointer"},
+                    "windows")
+
+    if "backend" in table:
+        backend = table["backend"]
+        if not isinstance(backend, str) or backend not in backend_names():
+            raise ConfigError(
+                f"windows.backend must be one of: {', '.join(backend_names())}"
+            )
+        windows = replace(windows, backend=backend)
+
+    if "park_pointer" in table:
+        if not isinstance(table["park_pointer"], bool):
+            raise ConfigError("windows.park_pointer must be true or false")
+        windows = replace(windows, park_pointer=table["park_pointer"])
+
+    for key, lo, hi in (("settle", 0.0, 5.0), ("launch_timeout", 0.0, 120.0)):
+        if key not in table:
+            continue
+        value = table[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(f"windows.{key} must be a number of seconds")
+        if not lo <= value <= hi:
+            raise ConfigError(f"windows.{key} must be between {lo} and {hi}")
+        windows = replace(windows, **{key: float(value)})
+    return windows
+
+
+def _parse_overlays(table: dict[str, Any]) -> dict[str, Overlay]:
+    """Parse ``[overlays.<name>]`` tables into overlay definitions."""
+    overlays: dict[str, Overlay] = {}
+    for name, spec in table.items():
+        if not name.replace("_", "").replace("-", "").isalnum():
+            raise ConfigError(
+                f"overlays: {name!r} is not a usable name. Use letters, digits, "
+                "'-' or '_', so a binding can refer to it as "
+                f'"{OVERLAY_PREFIX}{name}"'
+            )
+        if not isinstance(spec, dict):
+            raise ConfigError(
+                f"[overlays.{name}] must be a table, e.g.\n"
+                f'  [overlays.{name}]\n  class = "discord"\n'
+                f'  command = ["discord"]'
+            )
+        _reject_unknown(spec, {"class", "command"}, f"overlays.{name}")
+
+        window_class = spec.get("class")
+        if not isinstance(window_class, str) or not window_class.strip():
+            raise ConfigError(
+                f"overlays.{name}.class must be a non-empty string matching the "
+                'app\'s window class, e.g. class = "discord". '
+                "`padmode windows` prints the class of the focused window."
+            )
+
+        command = spec.get("command")
+        if command is not None and (
+            not isinstance(command, list)
+            or not command
+            or not all(isinstance(part, str) for part in command)
+        ):
+            raise ConfigError(
+                f"overlays.{name}.command must be a non-empty list of strings, "
+                'e.g. command = ["discord"]. Omit it entirely to only raise an '
+                "app that is already running."
+            )
+        overlays[name] = Overlay(
+            name=name,
+            window_class=window_class,
+            command=list(command) if command else None,
+        )
+    return overlays
+
+
+def _reject_unknown(table: dict[str, Any], known: set[str], section: str) -> None:
+    """Fail on a misspelled key rather than silently ignoring it.
+
+    A typo in ``command`` turns an overlay that launches its app into one that
+    quietly does nothing when the app is closed -- a bug the user would spend
+    real time on. Cheap to catch here.
+    """
+    unknown = sorted(set(table) - known)
+    if unknown:
+        raise ConfigError(
+            f"[{section}]: unknown key{'s' if len(unknown) > 1 else ''} "
+            f"{', '.join(repr(key) for key in unknown)}. "
+            f"Known: {', '.join(sorted(known))}"
+        )
 
 
 def _parse_desktop(table: dict[str, Any], cfg: Config) -> DesktopConfig:
@@ -290,7 +447,9 @@ def _validate_desktop_action(name: str, value: str) -> None:
     )
 
 
-def _parse_bindings(table: dict[str, Any], modifier: str) -> dict[str, Binding]:
+def _parse_bindings(
+    table: dict[str, Any], modifier: str, overlays: dict[str, Overlay]
+) -> dict[str, Binding]:
     """Merge user bindings over the defaults.
 
     Merging (rather than replacing) means adding one binding doesn't require
@@ -314,7 +473,7 @@ def _parse_bindings(table: dict[str, Any], modifier: str) -> dict[str, Binding]:
         if value is False:
             merged.pop(name, None)
             continue
-        merged[name] = _validate_binding(name, value)
+        merged[name] = _validate_binding(name, value, overlays)
 
     if modifier in merged:
         raise ConfigError(
@@ -324,13 +483,23 @@ def _parse_bindings(table: dict[str, Any], modifier: str) -> dict[str, Binding]:
     return merged
 
 
-def _validate_binding(name: str, value: Any) -> Binding:
-    """A binding is a known action id, or a non-empty list of argv strings."""
+def _validate_binding(name: str, value: Any, overlays: dict[str, Overlay]) -> Binding:
+    """A binding is a known action id, a declared overlay, or an argv list."""
     if isinstance(value, str):
+        overlay = overlay_name(value)
+        if overlay is not None:
+            if overlay not in overlays:
+                declared = ", ".join(sorted(overlays)) or "none are declared"
+                raise ConfigError(
+                    f"bindings.{name}: no overlay named {overlay!r}. "
+                    f"Declare it with [overlays.{overlay}] -- {declared}"
+                )
+            return value
         if value not in ACTIONS:
+            known = sorted(ACTIONS) + [f"{OVERLAY_PREFIX}{o}" for o in sorted(overlays)]
             raise ConfigError(
                 f"bindings.{name}: unknown action {value!r}. "
-                f"Known: {', '.join(sorted(ACTIONS))}"
+                f"Known: {', '.join(known)}"
             )
         return value
     if isinstance(value, list):

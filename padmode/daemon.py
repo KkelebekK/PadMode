@@ -5,7 +5,7 @@ I/O, and no evdev import. They are the entire testing strategy for input
 handling, because CI has no gamepad (CLAUDE.md §4, §5). Everything that touches
 the world lives in :class:`Daemon` below them.
 
-Three modes as of v0.2. When a fourth arrives and this file stops being easy to
+Four modes as of v0.3. When a fifth arrives and this file stops being easy to
 read in one sitting, split it into ``modes/`` -- but not before.
 """
 
@@ -18,13 +18,32 @@ import time
 from dataclasses import dataclass, field
 
 from . import buttons
-from .config import Binding, Config
+from .config import Binding, Config, Overlay, overlay_name
 
 log = logging.getLogger(__name__)
 
 #: Pointer updates per second while desktop mode is active.
 TICK_HZ = 60.0
 TICK_INTERVAL = 1.0 / TICK_HZ
+
+#: Tick used when the only outstanding work is a deferred return-to-game. The
+#: pointer is not moving, so 20 Hz is plenty to notice the settle elapsing.
+SETTLE_TICK = 0.05
+
+#: How often we look for the window of an app we just launched. Each look is
+#: one short-lived process, so this trades a little latency for staying well
+#: clear of spawning one 60 times a second.
+LAUNCH_POLL = 0.25
+
+#: Closed-loop cursor parking: how many move-and-look rounds to try, how close
+#: counts as arrived, and how long to let the compositor digest a move before
+#: reading the cursor back. The gain bounds stop one odd reading from turning
+#: into an absurd next request. See :meth:`Daemon._warp`.
+WARP_ATTEMPTS = 6
+WARP_TOLERANCE = 8
+WARP_LATENCY = 0.02
+WARP_GAIN_MIN = 0.05
+WARP_GAIN_MAX = 20.0
 
 
 class Mode(enum.Enum):
@@ -36,6 +55,14 @@ class Mode(enum.Enum):
     GUIDE_HELD = "guide_held"
     #: Pad drives the pointer and keyboard. Grabbed for the duration.
     DESKTOP = "desktop"
+    #: Like DESKTOP, but an app was raised over what was running and we
+    #: remember the window to hand focus back to on the way out.
+    OVERLAY = "overlay"
+
+
+#: Modes in which the pad drives the virtual pointer and keyboard. They differ
+#: only in what happens at the edges, so everything in between is shared.
+PAD_MODES = (Mode.DESKTOP, Mode.OVERLAY)
 
 
 class Grab(enum.Enum):
@@ -99,9 +126,13 @@ class Decision:
     virtual: tuple[VirtualOp, ...] = ()
     #: Set when the mode changed, so the daemon can react to the transition.
     mode: Mode | None = None
+    #: Name of the overlay to open, when entering overlay mode.
+    overlay: str | None = None
 
     def __bool__(self) -> bool:
-        return bool(self.grab or self.binding or self.virtual or self.mode)
+        return bool(
+            self.grab or self.binding or self.virtual or self.mode or self.overlay
+        )
 
 
 NOTHING = Decision()
@@ -123,11 +154,14 @@ def decide(
 
     * Pressing the modifier grabs the pad, so buttons become commands rather
       than leaking into the running game.
-    * While it is held, a bound button yields its binding, and the configured
-      desktop key enters desktop mode.
-    * In desktop mode the pad drives the pointer until the exit button.
+    * While it is held, a bound button yields its binding, the configured
+      desktop key enters desktop mode, and a button bound to ``overlay.<name>``
+      enters overlay mode.
+    * In desktop and overlay mode the pad drives the pointer until the exit
+      button. The two behave identically here; they differ only in what the
+      daemon does on the way in and out.
     """
-    if state.mode is Mode.DESKTOP:
+    if state.mode in PAD_MODES:
         return _decide_desktop(ev_type, ev_code, ev_value, state, config, now)
 
     modifier_code = buttons.code_of(config.modifier)
@@ -162,7 +196,18 @@ def decide(
         return Decision(mode=Mode.DESKTOP)
 
     binding = config.action_for(name)
-    return Decision(binding=binding) if binding is not None else NOTHING
+    if binding is None:
+        return NOTHING
+
+    overlay = overlay_name(binding)
+    if overlay is not None:
+        # Already grabbed from the modifier press, so the grab is unchanged.
+        # The daemon may still refuse the transition -- there may be no window
+        # backend, or nothing to show -- and put the mode back.
+        state.mode = Mode.OVERLAY
+        state.reset_inputs()
+        return Decision(mode=Mode.OVERLAY, overlay=overlay)
+    return Decision(binding=binding)
 
 
 def _decide_desktop(
@@ -428,12 +473,24 @@ def _vector_response(x: float, y: float, desktop) -> tuple[float, float]:
 class Daemon:
     """Wires the pure state machine to a real device and real subprocesses."""
 
-    def __init__(self, config: Config, reader, runner, virtual=None) -> None:
+    def __init__(self, config: Config, reader, runner, virtual=None, windows=None) -> None:
         self._config = config
         self._reader = reader
         self._runner = runner
         self._virtual = virtual
+        #: Window backend, or None when this session has none (see
+        #: :mod:`padmode.windows`). Overlay mode is the only thing that uses it.
+        self._windows = windows
         self._state = State()
+        #: Window to hand focus back to when overlay mode ends.
+        self._return_to = None
+        #: Where the cursor was before we parked it, so it can be put back.
+        self._parked_from: tuple[int, int] | None = None
+        #: ``(overlay, deadline, next poll)`` while waiting for a launched app.
+        self._pending_launch: tuple[Overlay, float, float] | None = None
+        #: When the deferred return-to-game is due.
+        self._pending_return: float | None = None
+        self._warned_park = False
 
     @property
     def state(self) -> State:
@@ -446,7 +503,14 @@ class Daemon:
         makes the machine unusable by controller, which is the worst failure
         mode this app has (CLAUDE.md §4).
         """
-        self._runner.preflight(self._config.bindings)
+        # Overlay bindings name an overlay, not an external command, so they
+        # are checked separately rather than confusing the action runner.
+        self._runner.preflight({
+            name: binding
+            for name, binding in self._config.bindings.items()
+            if overlay_name(binding) is None
+        })
+        self._preflight_overlays()
         log.info(
             "ready -- hold %s and press a bound button (%d bindings)",
             self._config.modifier,
@@ -460,6 +524,13 @@ class Daemon:
                     self._handle(*item)
         finally:
             self._reader.ungrab()
+            # A return that was still settling when we were asked to stop
+            # happens now, while the virtual devices are still open. Skipping
+            # it would leave the user staring at the overlay with the daemon
+            # gone -- and the grab is already released, so the order §6.1 cares
+            # about still holds.
+            if self._pending_return is not None:
+                self._finish_return()
             if self._virtual is not None:
                 self._virtual.close()
             log.info("stopped")
@@ -473,15 +544,15 @@ class Daemon:
         if not decision:
             return
 
-        # Only act on a genuine desktop-mode transition. Comparing against the
-        # previous mode keeps ordinary IDLE/GUIDE_HELD changes from needlessly
-        # tearing down the tick and the virtual devices.
-        entering = decision.mode is Mode.DESKTOP and was is not Mode.DESKTOP
-        leaving = was is Mode.DESKTOP and decision.mode not in (None, Mode.DESKTOP)
-        if entering and not self._enter_desktop():
+        # Only act on a genuine transition into or out of a pad-driven mode.
+        # Comparing against the previous mode keeps ordinary IDLE/GUIDE_HELD
+        # changes from needlessly tearing down the tick and virtual devices.
+        entering = decision.mode in PAD_MODES and was not in PAD_MODES
+        leaving = was in PAD_MODES and decision.mode not in (None, *PAD_MODES)
+        if entering and not self._enter(decision):
             return
         if leaving:
-            self._leave_desktop()
+            self._leave(was)
 
         if decision.grab is Grab.ACQUIRE:
             self._reader.grab()
@@ -494,12 +565,15 @@ class Daemon:
             self._apply(op)
 
     def _tick(self) -> None:
-        if self._state.mode is not Mode.DESKTOP or self._virtual is None:
+        now = time.monotonic()
+        # Window work first, and outside the mode check: a return-to-game is
+        # deliberately outstanding *after* we have left overlay mode.
+        self._pump_windows(now)
+        if self._state.mode not in PAD_MODES or self._virtual is None:
             return
         dx, dy, sx, sy = pointer_delta(self._state, self._config, TICK_INTERVAL)
         self._virtual.move(dx, dy)
         self._virtual.scroll(sx, sy)
-        now = time.monotonic()
         # A stick resting at centre emits nothing, so re-arming has to be
         # noticed here rather than waiting for an event that never comes. The
         # same goes for a deferred release: the button is already up, so no
@@ -519,21 +593,239 @@ class Daemon:
         elif op.kind == "tap":
             self._virtual.tap_keys(list(op.codes))
 
-    def _enter_desktop(self) -> bool:
-        """Start desktop mode, or back out cleanly if uinput is unavailable."""
-        if self._virtual is None or not self._virtual.open():
-            log.warning("desktop mode unavailable; staying put")
-            self._state.mode = Mode.IDLE
-            self._state.reset_inputs()
-            self._reader.ungrab()
-            return False
-        self._reader.set_tick(TICK_INTERVAL)
-        log.info("desktop mode -- press %s to leave", self._config.desktop.exit)
-        return True
+    # -- entering and leaving a pad-driven mode ------------------------
+    def _enter(self, decision: Decision) -> bool:
+        if decision.mode is Mode.OVERLAY:
+            return self._enter_overlay(decision.overlay)
+        return self._enter_desktop()
 
-    def _leave_desktop(self) -> None:
+    def _leave(self, was: Mode) -> None:
         self._reader.set_tick(None)
         if self._virtual is not None:
             # Releasing is what stops a button held on the way out from
             # leaving the virtual mouse button down forever.
             self._virtual.release_all()
+        if was is Mode.OVERLAY:
+            self._schedule_return()
+
+    def _enter_desktop(self) -> bool:
+        """Start desktop mode, or back out cleanly if uinput is unavailable."""
+        if self._virtual is None or not self._virtual.open():
+            log.warning("desktop mode unavailable; staying put")
+            return self._abort()
+        self._reader.set_tick(TICK_INTERVAL)
+        log.info("desktop mode -- press %s to leave", self._config.desktop.exit)
+        return True
+
+    def _enter_overlay(self, name: str | None) -> bool:
+        """Raise an app over what is running, remembering where to go back to.
+
+        Everything that can refuse the transition is checked before anything
+        visible happens, so a button that cannot work leaves the session
+        exactly as it found it rather than half-entering a mode.
+        """
+        overlay = self._config.overlays.get(name or "")
+        if overlay is None:  # unreachable via validated config
+            log.warning("no overlay named %r", name)
+            return self._abort()
+        if self._windows is None:
+            log.warning(
+                "overlay %s needs a window backend and this session has none",
+                overlay.name,
+            )
+            return self._abort()
+        if self._virtual is None or not self._virtual.open():
+            log.warning("overlay %s needs virtual input; staying put", overlay.name)
+            return self._abort()
+
+        # Read this before anything can steal focus -- it is the whole point.
+        self._return_to = self._windows.get_active_window()
+        target = self._windows.find_window(overlay.window_class)
+        if target is None:
+            if not overlay.command:
+                log.info(
+                    "overlay %s: nothing matches class %r and there is no "
+                    "command to start it",
+                    overlay.name, overlay.window_class,
+                )
+                return self._abort()
+            if not self._runner.run(overlay.command):
+                return self._abort()  # the runner has already said why
+            now = time.monotonic()
+            self._pending_launch = (
+                overlay, now + self._config.windows.launch_timeout, now + LAUNCH_POLL
+            )
+
+        # A new overlay supersedes a return that is still pending from the
+        # last one; otherwise it would fire mid-overlay and yank focus away.
+        self._pending_return = None
+        self._reader.set_tick(TICK_INTERVAL)
+        if target is not None:
+            self._show(overlay, target)
+        log.info("overlay %s -- press %s to go back",
+                 overlay.name, self._config.desktop.exit)
+        return True
+
+    def _abort(self) -> bool:
+        """Undo a refused transition into a pad-driven mode.
+
+        Always returns False, so callers can ``return self._abort()``.
+        """
+        self._state.mode = Mode.IDLE
+        self._state.reset_inputs()
+        self._return_to = None
+        self._pending_launch = None
+        self._reader.ungrab()
+        return False
+
+    # -- overlay window work, all driven from the tick -----------------
+    def _pump_windows(self, now: float) -> None:
+        """Advance whatever the overlay is waiting on. Never blocks the loop."""
+        if self._pending_launch is not None:
+            self._poll_launch(now)
+        if self._pending_return is not None and now >= self._pending_return:
+            self._finish_return()
+
+    def _poll_launch(self, now: float) -> None:
+        """Watch for the window of an app we started, until it or time runs out."""
+        overlay, deadline, next_poll = self._pending_launch
+        if now < next_poll:
+            return
+        target = self._windows.find_window(overlay.window_class) if self._windows else None
+        if target is not None:
+            self._pending_launch = None
+            self._show(overlay, target)
+            return
+        if now >= deadline:
+            self._pending_launch = None
+            log.warning(
+                "overlay %s: %s opened no window matching class %r within %.0fs",
+                overlay.name, overlay.command[0] if overlay.command else "?",
+                overlay.window_class, self._config.windows.launch_timeout,
+            )
+            return
+        self._pending_launch = (overlay, deadline, now + LAUNCH_POLL)
+
+    def _show(self, overlay: Overlay, window_id) -> None:
+        if self._windows is None:
+            return
+        log.info("overlay %s: activating %s", overlay.name, window_id)
+        self._windows.activate_window(window_id)
+        if self._config.windows.park_pointer:
+            self._park(window_id)
+
+    def _schedule_return(self) -> None:
+        """Hand focus back, but not yet.
+
+        Gotcha §6.1: the grab has to be released *before* the old window
+        regains focus, or a still-held return button leaks a raw gamepad event
+        into it -- which used to crash the frontend. The release happens in
+        this same event; the re-activation is deferred past it by
+        ``windows.settle``.
+
+        Deferring rather than sleeping also keeps the read loop alive through
+        the wait, so SIGTERM still gets us out with the pad released.
+        """
+        if self._windows is None or (
+            self._return_to is None and self._parked_from is None
+        ):
+            self._return_to = self._parked_from = None
+            return
+        self._pending_return = time.monotonic() + self._config.windows.settle
+        self._reader.set_tick(SETTLE_TICK)
+
+    def _finish_return(self) -> None:
+        self._pending_return = None
+        # Put the cursor back *before* the old window takes focus: the motion
+        # then lands on the overlay, which does not care, rather than on a game
+        # that would read it as a camera turn.
+        if self._parked_from is not None:
+            target, self._parked_from = self._parked_from, None
+            self._warp(*target)
+        if self._windows is not None and self._return_to is not None:
+            log.info("returning to %s", self._return_to)
+            self._windows.activate_window(self._return_to)
+        self._return_to = None
+        if self._state.mode not in PAD_MODES:
+            self._reader.set_tick(None)
+
+    # -- cursor parking (gotcha §6.3) ----------------------------------
+    def _park(self, window_id) -> None:
+        rect = self._windows.window_geometry(window_id)
+        here = self._windows.pointer_position()
+        if rect is None or here is None:
+            if not self._warned_park:
+                self._warned_park = True
+                log.warning(
+                    "park_pointer: the %s backend cannot report the window "
+                    "geometry or the cursor, so parking is disabled",
+                    getattr(self._windows, "name", "window"),
+                )
+            return
+        # Only the *first* park records an origin. Opening a second overlay
+        # before the return has run would otherwise record the middle of the
+        # first one as "where the cursor started", and put it there on the way
+        # out instead of back where the user left it.
+        if self._parked_from is None:
+            self._parked_from = here
+        self._warp(*rect.centre)
+
+    def _warp(self, x: int, y: int) -> None:
+        """Drive the cursor to a screen position by moving and looking.
+
+        There is no warp to call: our pointer is a *relative* device, and
+        neither kdotool nor xdotool can place the cursor on a Wayland session.
+        Nor can the delta be computed once and emitted -- pointer acceleration
+        means a relative move does not travel as far as its arithmetic says,
+        and how far off it is depends on a curve we do not get to see.
+
+        So each round measures itself: ask for a move, read where the cursor
+        actually ended up, and use the ratio to scale the next request. Two
+        rounds are usually enough whether the session accelerates or decelerates
+        us, and no round trusts a number it has not just observed.
+
+        **Not yet measured on real hardware** -- park_pointer is off by default
+        and this loop is bounded, so the worst case is a cursor that stops
+        somewhere short. See docs/window-backends.md before tuning it, and
+        trace it rather than reasoning about it (CLAUDE.md §4).
+        """
+        if self._virtual is None or self._windows is None:
+            return
+        gain = 1.0
+        for _ in range(WARP_ATTEMPTS):
+            here = self._windows.pointer_position()
+            if here is None:
+                return
+            dx, dy = x - here[0], y - here[1]
+            if abs(dx) <= WARP_TOLERANCE and abs(dy) <= WARP_TOLERANCE:
+                return
+            request = (dx / gain, dy / gain)
+            self._virtual.move(*request)
+            time.sleep(WARP_LATENCY)
+            after = self._windows.pointer_position()
+            if after is None:
+                return
+            asked = math.hypot(*request)
+            moved = math.hypot(after[0] - here[0], after[1] - here[1])
+            if asked > 0 and moved > 0:
+                gain = min(max(moved / asked, WARP_GAIN_MIN), WARP_GAIN_MAX)
+        log.debug("park_pointer: did not settle on (%d, %d)", x, y)
+
+    def _preflight_overlays(self) -> None:
+        """Say at startup what will not work, rather than on the first press."""
+        overlays = self._config.overlays
+        if not overlays:
+            return
+        if self._windows is None:
+            log.warning(
+                "%d overlay(s) configured but this session has no window "
+                "backend, so they are disabled",
+                len(overlays),
+            )
+            return
+        for name, overlay in sorted(overlays.items()):
+            if overlay.command and not self._runner.available(overlay.command[0]):
+                log.warning(
+                    "overlay %s: %s is not installed, so it can only raise an "
+                    "already-running window", name, overlay.command[0],
+                )

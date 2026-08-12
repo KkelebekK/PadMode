@@ -9,10 +9,11 @@ screen with the pad.
 `WeHaveSteamMachineAtHome` (a joke); do not use "Steam Machine" or other Valve
 product names in the shipped tool, package, or docs.
 
-**Status: v0.2 implemented** (Guide-hold media/volume/mic; uinput virtual
-mouse/keyboard; desktop mode with bindable stick directions; 169 tests). This
-document is the contract. If something here is wrong, fix this file in the same
-change as the code.
+**Status: v0.3 implemented** (Guide-hold media/volume/mic; uinput virtual
+mouse/keyboard; desktop mode with bindable stick directions; window backends
+and overlay mode with return-to-game; 277 tests). This document is the
+contract. If something here is wrong, fix this file in the same change as the
+code.
 
 ---
 
@@ -94,9 +95,10 @@ more importantly, deletes *"now open the input-remapper GUI and hand-build two
 presets"* from the install instructions. That manual step is the difference
 between a tool people install and one they bounce off.
 
-### 3.3 Window backends (v0.3+, not before)
+### 3.3 Window backends
 
-Only **three** operations are needed. Keep the interface this small:
+Only **three** operations are required. Keep it this small — every one of them
+has to be implemented by every future community backend:
 
 ```python
 find_window(window_class) -> WindowId | None
@@ -104,9 +106,22 @@ activate_window(window_id) -> None
 get_active_window() -> WindowId | None
 ```
 
-Backends: `kwin` (via `kdotool`), `x11` (via `xdotool`/`wmctrl`), autodetected.
-GNOME Wayland **cannot** be supported — it refuses window activation from
-clients. Say so plainly in the README rather than accumulating bug reports.
+Three more are **optional**, default to returning `None`, and disable the
+feature built on them rather than the backend: `window_geometry` and
+`pointer_position` (for `park_pointer`), and `window_class` (for
+`padmode windows` and nothing else).
+
+Backends: `kwin` (via `kdotool`), `x11` (via `xdotool`; `wmctrl` turned out to
+be unnecessary), autodetected from the session. GNOME Wayland **cannot** be
+supported — it refuses window activation from clients. Say so plainly in the
+README rather than accumulating bug reports.
+
+No backend for this session means overlays are disabled with one startup line
+saying why; it is never a startup failure, because a config shared between a
+KDE box and a GNOME laptop should still run on both.
+
+Detail, including the tools' output formats and the manual checklist, is in
+`docs/window-backends.md`.
 
 ### 3.4 Roadmap
 
@@ -114,7 +129,7 @@ clients. Say so plainly in the README rather than accumulating bug reports.
 |---|---|---|
 | ~~**v0.1**~~ ✅ | evdev reader, Guide-hold media/volume/mic, config, systemd unit, udev rule, `install.sh` | **None** — works on every Linux desktop |
 | ~~**v0.2**~~ ✅ | uinput virtual device, desktop mode (pad as mouse), return button | **None** — confirmed: no window code was needed |
-| **v0.3** | Window backends, overlay mode, return-to-game | KDE + X11 |
+| ~~**v0.3**~~ ✅ | Window backends, overlay mode, return-to-game | KDE + X11 |
 | **v0.4** | Frontend integration (return target), metadata generators | KDE + X11 |
 | **v0.5** | Unlock module (opt-in, off by default) | Screensaver D-Bus |
 
@@ -220,11 +235,17 @@ Learned the hard way; re-learning them is expensive.
    still-held return button leaks a raw gamepad event into the newly-focused
    window. This crashed Pegasus. The old scripts used a 0.7s `SETTLE` delay
    between release and re-activation — keep an equivalent, and keep it
-   configurable.
+   configurable. *Live since v0.3:* `windows.settle`, deferred onto the tick
+   rather than slept through, in `Daemon._schedule_return`. The ordering has a
+   test of its own; do not "simplify" it into a sleep.
 2. **Exclusive-fullscreen games cannot be overlaid.** Document borderless
    windowed as a requirement; don't try to work around it.
 3. **Focus-follows-mouse can steal focus from an overlay** if the cursor drifts
-   off it. Consider grabbing/parking the pointer for the overlay's duration.
+   off it. *Live since v0.3:* `windows.park_pointer`, off by default. Note that
+   **no compositor here can warp the cursor** — KWin's script API has no
+   placement call and `xdotool mousemove` does nothing on Wayland — so parking
+   drives our own relative pointer in a measure-and-correct loop. That loop has
+   not yet been checked against real pointer acceleration.
 4. **KWin "Keep above" silently breaks Alt+Tab.** Use focus protection instead.
    Relevant to the printed manual instructions, not to our code.
 5. **Gamepads re-enumerate.** The read loop must survive the device vanishing
@@ -246,8 +267,11 @@ padmode/
   input/virtual.py          # uinput virtual mouse + keyboard
   actions/builtin.py        # action registry (pure argv builders)
   actions/runner.py         # probing + execution
-  windows/                  # *v0.3* backend interface + kwin.py, x11.py
-  modes/                    # *v0.3+* split out of daemon.py when it earns it
+  windows/backend.py        # the interface + subprocess plumbing
+  windows/kwin.py           # kdotool
+  windows/x11.py            # xdotool
+  windows/__init__.py       # session detection
+  modes/                    # *later* split out of daemon.py when it earns it
 contrib/metadata/           # *v0.4* heroic2pegasus, steam2pegasus
 packaging/                  # udev rule, systemd unit template; *PKGBUILD*
 tests/                      # unit + synthetic-uinput integration
@@ -255,9 +279,10 @@ docs/
 install.sh
 ```
 
-`modes/` does not exist yet on purpose: with two modes, the state machine is
-more readable as one file than as five. Split it when a third mode makes
-`daemon.py` hard to follow, not before.
+`modes/` does not exist yet on purpose: overlay mode shares nearly all of its
+behaviour with desktop mode and differs only at the edges, so the two read
+better as one file than as five. Split when a mode arrives that is genuinely
+its own thing — unlock (v0.5) probably is.
 
 ---
 
@@ -283,6 +308,8 @@ rather than a spec dump. Both were distilled from a working implementation;
 prefer them over re-deriving:
 
 - `docs/virtual-input.md` — v0.2 desktop mode and the v0.5 unlock module.
+- `docs/window-backends.md` — v0.3 backends, overlay sequencing, cursor
+  parking, and the manual checklist §5 requires.
 - `docs/metadata-generators.md` — v0.4 Heroic and Steam library scraping.
 
 ## 10. Open items

@@ -67,6 +67,14 @@ EOF
         command -v "$tool" >/dev/null || warn \
             "optional: '$tool' not found -- the bindings that use it will be disabled"
     done
+
+    # Which of these is the right one depends on the session, and padmode
+    # already knows the rules -- so check only that *some* window tool exists
+    # and point at 'padmode windows' for the specifics.
+    if ! command -v kdotool >/dev/null && ! command -v xdotool >/dev/null; then
+        warn "optional: no window tool found (kdotool on KDE Wayland, xdotool"
+        warn "  on X11) -- app overlays will be disabled. Nothing else changes."
+    fi
 }
 
 print_steps() {
@@ -234,6 +242,7 @@ main() {
     echo "  padmode devices   # confirm your gamepad is detected"
     echo "  padmode config    # show the effective configuration"
     echo "  padmode actions   # list what you can bind"
+    echo "  padmode windows   # whether app overlays can work on this desktop"
     echo
     echo "Hold GUIDE and press RB/LB/A/X/Y or d-pad up/down."
     echo "Logs: journalctl --user -u padmode -f"
