@@ -34,13 +34,16 @@ def _on_sigterm(_signum: int, _frame) -> None:
 
 
 def cmd_run(args: argparse.Namespace, config: Config) -> int:
-    from .input import GamepadReader
+    from .input import GamepadReader, VirtualInput
 
     signal.signal(signal.SIGTERM, _on_sigterm)
     reader = GamepadReader(name=config.device_name, path=config.device_path)
     runner = ActionRunner(ActionContext(volume_step=config.volume_step))
+    # Created here but not opened: the uinput devices appear on first entry to
+    # desktop mode, so someone who never uses it gets no phantom hardware.
+    virtual = VirtualInput() if config.desktop.enabled else None
     try:
-        Daemon(config, reader, runner).run()
+        Daemon(config, reader, runner, virtual).run()
     except KeyboardInterrupt:
         pass
     return 0
@@ -109,6 +112,19 @@ def cmd_config(args: argparse.Namespace, config: Config) -> int:
     for name, binding in sorted(config.bindings.items()):
         rendered = f'"{binding}"' if isinstance(binding, str) else repr(binding)
         print(f"{name} = {rendered}")
+
+    desktop = config.desktop
+    print("\n[desktop]")
+    print(f"enabled = {str(desktop.enabled).lower()}")
+    print(f'enter = "{desktop.enter}"        # hold {config.modifier} and press this')
+    print(f'exit = "{desktop.exit}"')
+    print(f"pointer_speed = {desktop.pointer_speed:g}")
+    print(f"scroll_speed = {desktop.scroll_speed:g}")
+    print(f"dead_zone = {desktop.dead_zone:g}")
+    print(f"curve = {desktop.curve:g}")
+    print("\n[desktop.bindings]")
+    for name, spec in sorted(desktop.bindings.items()):
+        print(f'{name} = "{spec}"')
     return 0
 
 

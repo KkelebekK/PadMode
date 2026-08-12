@@ -13,12 +13,26 @@ Two rules from CLAUDE.md drive this whole module:
 from __future__ import annotations
 
 import logging
+import selectors
 import time
 from collections.abc import Iterator
 
 from evdev import InputDevice, ecodes, list_devices
 
 log = logging.getLogger(__name__)
+
+
+#: Yielded when the tick deadline passes, in place of an event.
+#:
+#: Desktop mode needs a steady heartbeat because an analogue stick reports a
+#: *position*: holding it at full deflection produces no further events, so
+#: without a tick the pointer would move only while the stick was moving.
+#:
+#: It is ``None`` rather than a sentinel class so that the pure state machine
+#: in ``daemon.py`` can recognise a tick without importing anything from this
+#: module, which would drag evdev into the one part of the app that must stay
+#: testable without it. Events are always 3-tuples, so there is no ambiguity.
+TICK = None
 
 #: Devices we create ourselves (v0.2+) are named with this prefix so that we
 #: never grab our own virtual pad and feed our output back into our input.
@@ -41,6 +55,15 @@ def looks_like_gamepad(device: InputDevice) -> bool:
     keys = set(caps.get(ecodes.EV_KEY, ()))
     axes = {code for code, _ in caps.get(ecodes.EV_ABS, ())}
     return ecodes.BTN_SOUTH in keys and bool(axes)
+
+
+def _axis_ranges(device: InputDevice) -> dict[int, tuple[int, int]]:
+    """Read every absolute axis range the device advertises."""
+    try:
+        caps = device.capabilities().get(ecodes.EV_ABS, ())
+    except OSError:
+        return {}
+    return {code: (info.min, info.max) for code, info in caps}
 
 
 def _candidates() -> Iterator[InputDevice]:
@@ -101,6 +124,26 @@ class GamepadReader:
         self._device: InputDevice | None = None
         self._grabbed = False
         self._stop = False
+        self._tick_interval: float | None = None
+        self._axis_ranges: dict[int, tuple[int, int]] = {}
+
+    @property
+    def axis_ranges(self) -> dict[int, tuple[int, int]]:
+        """Per-axis ``(min, max)`` for the open device.
+
+        Stick ranges are a property of the hardware, so they are read from the
+        device rather than assumed. Empty until a device is open.
+        """
+        return self._axis_ranges
+
+    def set_tick(self, interval: float | None) -> None:
+        """Start or stop the heartbeat, in seconds; None blocks indefinitely.
+
+        Dynamic rather than fixed so we only wake up 60 times a second while
+        desktop mode is actually active. Ticking constantly would keep a laptop
+        from ever settling, for a feature most users are not using right now.
+        """
+        self._tick_interval = interval
 
     @property
     def grabbed(self) -> bool:
@@ -145,8 +188,8 @@ class GamepadReader:
             # The device vanished while we held it; the grab died with it.
             pass
 
-    def events(self) -> Iterator[Event]:
-        """Infinite stream of ``(type, code, value)``, across reconnects.
+    def events(self) -> Iterator[Event | None]:
+        """Infinite stream of ``(type, code, value)`` and ticks, across reconnects.
 
         Never returns normally. Exits by exception -- ``SystemExit`` from the
         signal handler, or ``GeneratorExit`` if the consumer stops early -- and
@@ -160,10 +203,7 @@ class GamepadReader:
                     continue
                 log.info("listening on %s (%s)", device.path, device.name)
                 try:
-                    for event in device.read_loop():
-                        yield (event.type, event.code, event.value)
-                        if self._stop:
-                            return
+                    yield from self._pump(device)
                 except OSError as exc:
                     log.info("%s went away (%s); waiting for it to come back",
                              device.path, exc)
@@ -174,11 +214,51 @@ class GamepadReader:
         finally:
             self._close()
 
+    def _pump(self, device: InputDevice) -> Iterator[Event | None]:
+        """Yield events, interleaving ticks on a fixed schedule when enabled.
+
+        The deadline is tracked explicitly instead of relying on ``select``
+        timing out. Otherwise a stick being actively waggled produces a steady
+        stream of events, ``select`` never times out, and ticks stop arriving
+        precisely when pointer motion is most needed.
+        """
+        selector = selectors.DefaultSelector()
+        selector.register(device.fileno(), selectors.EVENT_READ)
+        deadline: float | None = None
+        try:
+            while not self._stop:
+                interval = self._tick_interval
+                if interval is None:
+                    deadline, timeout = None, None
+                else:
+                    now = time.monotonic()
+                    if deadline is None:
+                        deadline = now + interval
+                    timeout = max(0.0, deadline - now)
+
+                if selector.select(timeout):
+                    try:
+                        for event in device.read():
+                            yield (event.type, event.code, event.value)
+                            if self._stop:
+                                return
+                    except BlockingIOError:
+                        pass  # raced with another reader; nothing buffered
+
+                if deadline is not None and time.monotonic() >= deadline:
+                    yield TICK
+                    # Re-base rather than accumulate, so a slow tick never
+                    # queues a burst of catch-up ticks.
+                    deadline = max(time.monotonic(), deadline + interval)
+        finally:
+            selector.close()
+
     def _open(self) -> InputDevice | None:
         device = find_gamepad(self._name, self._path)
         if device is None:
             log.debug("no gamepad found; retrying in %.1fs", self._retry_delay)
         self._device = device
+        self._axis_ranges = _axis_ranges(device) if device else {}
         return device
 
     def _close(self) -> None:

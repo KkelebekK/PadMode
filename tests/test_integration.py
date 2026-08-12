@@ -55,6 +55,8 @@ def _gamepad_capabilities() -> dict:
         ecodes.EV_ABS: [
             (ecodes.ABS_X, axis),
             (ecodes.ABS_Y, axis),
+            (ecodes.ABS_RX, axis),
+            (ecodes.ABS_RY, axis),
             (ecodes.ABS_HAT0X, hat),
             (ecodes.ABS_HAT0Y, hat),
         ],

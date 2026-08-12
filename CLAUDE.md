@@ -9,9 +9,10 @@ screen with the pad.
 `WeHaveSteamMachineAtHome` (a joke); do not use "Steam Machine" or other Valve
 product names in the shipped tool, package, or docs.
 
-**Status: v0.1 implemented** (Guide-hold media/volume/mic, config, packaging,
-71 tests). This document is the contract. If something here is wrong, fix this
-file in the same change as the code.
+**Status: v0.2 implemented** (Guide-hold media/volume/mic; uinput virtual
+mouse/keyboard; desktop mode with bindable stick directions; 169 tests). This
+document is the contract. If something here is wrong, fix this file in the same
+change as the code.
 
 ---
 
@@ -111,8 +112,8 @@ clients. Say so plainly in the README rather than accumulating bug reports.
 
 | Version | Contents | Compositor dependency |
 |---|---|---|
-| **v0.1** | evdev reader, Guide-hold media/volume/mic, config, systemd unit, udev rule, `install.sh` | **None** — works on every Linux desktop |
-| **v0.2** | uinput virtual device, desktop mode (pad as mouse), return button | **None** — `desktop-mode.sh` never called `kdotool` |
+| ~~**v0.1**~~ ✅ | evdev reader, Guide-hold media/volume/mic, config, systemd unit, udev rule, `install.sh` | **None** — works on every Linux desktop |
+| ~~**v0.2**~~ ✅ | uinput virtual device, desktop mode (pad as mouse), return button | **None** — confirmed: no window code was needed |
 | **v0.3** | Window backends, overlay mode, return-to-game | KDE + X11 |
 | **v0.4** | Frontend integration (return target), metadata generators | KDE + X11 |
 | **v0.5** | Unlock module (opt-in, off by default) | Screensaver D-Bus |
@@ -126,10 +127,12 @@ and v0.2 are *universally useful on their own*.
 
 - **Pure decision functions.** The existing `gamepad-guide-daemon.py` got this
   right: a decision function returning an action, with no I/O. Ours is
-  `decide(ev_type, ev_code, ev_value, state, config) -> Decision` in
-  `daemon.py` (config is an explicit argument rather than being smuggled in via
-  `state`, so the output depends only on the inputs). Keep that shape — it is
-  the entire testing strategy for input handling, since CI has no gamepad.
+  `decide(ev_type, ev_code, ev_value, state, config, now) -> Decision` in
+  `daemon.py`. Config *and the clock* are explicit arguments rather than being
+  smuggled in via `state` or read from `time.monotonic()` inside, so the output
+  depends only on the inputs and time-dependent behaviour is testable without
+  sleeping. Keep that shape — it is the entire testing strategy for input
+  handling, since CI has no gamepad.
 - **Never hardcode a device.** The old code pinned `"Generic X-Box pad"` and
   `/dev/input/event3`. Enumerate and match by capability, with a config
   override.
@@ -142,6 +145,29 @@ and v0.2 are *universally useful on their own*.
   grabbed makes the machine unusable by controller — the worst failure mode
   this app has. Also handle `SIGTERM`.
 - **Log to stdout/stderr, let journald handle it.** No log files.
+- **Debug input problems by tracing the device, never by reasoning about it.**
+  This is not a style preference; it is the most expensive lesson in the
+  project so far. One misbehaviour ("a stick flick steps two windows") produced
+  four consecutive fixes built on plausible theories, each of which addressed a
+  mechanism that measurement later showed does not happen on the hardware. The
+  actual causes — diagonal contamination into the scroll wheel, and a stick
+  click bouncing when the stick is moved — were both obvious within one trace,
+  and neither had been guessed. Symptoms that *sound* like input-handling bugs
+  routinely originate in the hardware or in a second process.
+
+  So, before changing any input logic in response to a report:
+
+  1. Trace the real device. `decide()` takes an explicit `now`, so a captured
+     event stream can be replayed offline and the decision logic checked in
+     isolation.
+  2. Watch what the *virtual* devices actually emit. "We sent one keystroke and
+     the compositor acted twice" and "we sent two" look identical from the
+     outside and need completely different fixes.
+  3. Confirm exactly one padmode is running first. Two daemons produce
+     confusing, self-consistent nonsense — and any tool written for this must
+     *refuse* to run when it finds duplicates rather than picking one.
+  4. Only then form a theory, and say plainly which observation rules out the
+     alternatives.
 
 ---
 
@@ -162,12 +188,27 @@ pytest** — the promise that this project needs no dependencies should hold for
 contributors too, and most distros ship a PEP 668 Python where installing test
 deps is its own chore.
 
-Two things the integration tests learned the hard way, both worth keeping:
+Things the integration tests learned the hard way, all worth keeping:
 
-- A uinput write is dropped unless it is a real **state change**. A key release
-  for a button that was never pressed emits nothing, so it cannot be used to
-  wake a blocked read loop; an axis move can.
+- A uinput write is dropped unless it is a real **state change** *on an axis or
+  key the device actually advertises*. A key release for a button that was
+  never pressed emits nothing; so does a write to an undeclared axis. Both fail
+  silently, and both show up as tests that mysteriously wait out their timeout.
 - Writing to a closed `UInput` raises `ValueError` (fd is -1), not `OSError`.
+- The daemon's own virtual pointer advertises `BTN_LEFT` and would otherwise
+  match the gamepad capability check. The `padmode` name prefix in
+  `reader.VIRTUAL_PREFIX` is what stops us reading back our own output — do not
+  rename the virtual devices without updating it.
+- **Never identify a virtual device by name, and never by diffing
+  `/dev/input`.** A padmode running on the same machine — the maintainer's own,
+  during development — has devices with identical names, so tests silently
+  attach to the wrong one and record nothing. Diffing the device list around
+  creation looks like the fix but is not: event numbers are recycled, so a node
+  still being torn down can hold the number the new device is about to get.
+  `virtual._node_of` uses the `UI_GET_SYSNAME` ioctl, which asks the fd itself.
+- Tests must assume **other input devices exist**, including real controllers
+  and another padmode instance. Assertions of the form "the only gamepad is the
+  synthetic one" fail on any developer machine with a pad plugged in.
 
 ---
 
@@ -201,10 +242,10 @@ padmode/
   daemon.py                 # decide() + Daemon; the state machine
   config.py                 # TOML, defaults, validation
   buttons.py                # friendly names <-> evdev codes
-  input/reader.py           # device discovery, read loop, grab/ungrab
+  input/reader.py           # device discovery, read loop, grab/ungrab, ticks
+  input/virtual.py          # uinput virtual mouse + keyboard
   actions/builtin.py        # action registry (pure argv builders)
   actions/runner.py         # probing + execution
-  input/virtual.py          # *v0.2* uinput virtual mouse/keyboard
   windows/                  # *v0.3* backend interface + kwin.py, x11.py
   modes/                    # *v0.3+* split out of daemon.py when it earns it
 contrib/metadata/           # *v0.4* heroic2pegasus, steam2pegasus
