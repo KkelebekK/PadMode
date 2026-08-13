@@ -45,6 +45,7 @@ is no longer a second implementation to consult or stay compatible with.
 | Bindings | **Good defaults, fully overridable** via config |
 | Unlock feature | **In-repo, opt-in, off by default**, with a blunt security warning |
 | Metadata generators | **Same repo, own subcommand** (`padmode metadata …`), imported lazily by the CLI and **never by the daemon** — enforced by a test, not by good intentions |
+| Anything that draws | **A separate process.** The on-screen keyboard (v0.5) is the first, and its GUI toolkit is an *optional runtime dependency* probed like `playerctl`: missing means that one feature is disabled, never that the daemon fails to start |
 | Packaging | **AUR + `install.sh`** |
 | Installer scope | **Both**: prompted, explained DE changes *and* a printed manual-steps mode for people who won't run them |
 | License | **GPL-3.0** (ecosystem fit — input-remapper, KDE, evdev tooling are GPL) |
@@ -74,6 +75,10 @@ One process opens the gamepad and never lets go of ownership. Modes:
 - `guide_held` — momentarily grabbed; buttons are commands, not game input.
 - `desktop` — virtual mouse/keyboard active; pad drives the desktop.
 - `overlay` — like `desktop`, but we remember a window to return to.
+- `osk` — *v0.5*, on-screen keyboard. The one mode that may need to be
+  **concurrent** with another (the pointer stays useful while typing), which
+  the state machine has never had to express. See
+  `docs/on-screen-keyboard.md`.
 - `unlock` — virtual keyboard types digits at the lock screen (opt-in).
 
 Mode transitions are the whole app. Keep them in one readable place.
@@ -154,8 +159,9 @@ Core stays frontend-agnostic: nothing here knows what Pegasus is.
 | ~~**v0.2**~~ ✅ | uinput virtual device, desktop mode (pad as mouse), return button | **None** — confirmed: no window code was needed |
 | ~~**v0.3**~~ ✅ | Window backends, overlay mode, return-to-game | KDE + X11 |
 | ~~**v0.4**~~ ✅ | Frontend integration (return target), Heroic metadata generator | KDE + X11 |
-| **v0.4.1** | Steam metadata generator (specified, not built) | None |
-| **v0.5** | Unlock module (opt-in, off by default) | Screensaver D-Bus |
+| **v0.5** | On-screen keyboard, console style (`docs/on-screen-keyboard.md`) | KDE + X11 — **layer-shell**, not window activation |
+| **v0.6** | Steam metadata generator (specified, not built) | None |
+| **v0.7** | Unlock module (opt-in, off by default) | Screensaver D-Bus |
 
 Do not pull work earlier in this list. The point of the ordering is that v0.1
 and v0.2 are *universally useful on their own*.
@@ -333,7 +339,10 @@ padmode/
   windows/__init__.py       # session detection
   metadata/heroic.py        # Heroic library -> metadata; never imported above
   metadata/pegasus.py       # the Pegasus writer
-  metadata/steam.py         # *v0.4.1*, specified in docs/
+  metadata/steam.py         # *v0.6*, specified in docs/
+  osk/                      # *v0.5* the keyboard: its own process, its own
+                            # toolkit, launched by the daemon and never
+                            # imported by it
   modes/                    # *later* split out of daemon.py when it earns it
 packaging/                  # udev rule, systemd units; *PKGBUILD*
 tests/                      # unit + synthetic-uinput integration
@@ -351,7 +360,7 @@ generator resolves them.
 `modes/` does not exist yet on purpose: overlay mode shares nearly all of its
 behaviour with desktop mode and differs only at the edges, so the two read
 better as one file than as five. Split when a mode arrives that is genuinely
-its own thing — unlock (v0.5) probably is.
+its own thing — unlock (v0.7) probably is.
 
 ---
 
@@ -376,7 +385,10 @@ Detail lives in `docs/`, so this file stays a contract rather than a spec dump.
 These were distilled from a working implementation; prefer them over
 re-deriving:
 
-- `docs/virtual-input.md` — v0.2 desktop mode and the v0.5 unlock module.
+- `docs/virtual-input.md` — v0.2 desktop mode and the unlock module (v0.7).
+- `docs/on-screen-keyboard.md` — v0.5. Read the risks section before writing
+  any of it: our own surface may show up in `find_window` the way plasmashell's
+  does, which would poison overlay matching and return targets.
 - `docs/window-backends.md` — backends, overlay sequencing, the return
   fallback, cursor parking, and the manual checklist §5 requires.
 - `docs/metadata-generators.md` — the Heroic generator as built, and the Steam

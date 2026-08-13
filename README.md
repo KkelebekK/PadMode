@@ -349,8 +349,9 @@ and quietly ignoring half your bindings.
 | ✅ v0.2 | Virtual mouse/keyboard, desktop mode | No |
 | ✅ v0.3 | Window backends, in-game overlays, return-to-game | KDE + X11 |
 | ✅ **v0.4** | Frontend button and fallback, Heroic metadata generator | KDE + X11 |
-| v0.4.1 | Steam metadata generator | No |
-| v0.5 | Gamepad unlock (opt-in, off by default) | Screensaver D-Bus |
+| v0.5 | On-screen keyboard you drive with the pad, like a console | KDE + X11 |
+| v0.6 | Steam metadata generator | No |
+| v0.7 | Gamepad unlock (opt-in, off by default) | Screensaver D-Bus |
 
 v0.1 and v0.2 are deliberately useful on their own, on any desktop. Overlays
 are the first feature that has to activate a window, which is where Wayland

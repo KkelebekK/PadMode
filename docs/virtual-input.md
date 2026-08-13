@@ -1,9 +1,9 @@
-# Virtual input device (v0.2, v0.5)
+# Virtual input device (v0.2, v0.7)
 
 Reference for `padmode/input/virtual.py` and the modes built on it.
 
 **Desktop mode (v0.2) is implemented.** The section below documents what
-shipped. The unlock module (v0.5) is still a specification, written down
+shipped. The unlock module (v0.7) is still a specification, written down
 because it was learned by building a working version once.
 
 We create our own uinput device with `python-evdev` rather than depending on
@@ -16,7 +16,7 @@ deletes "now hand-build two presets in a GUI" from the install instructions.
 
 **A uinput virtual keyboard is indistinguishable from a real USB keyboard** to
 everything above the kernel — compositors, toolkits, and lock screens included.
-There is no "synthetic input" flag to detect. This is why unlock (v0.5) is
+There is no "synthetic input" flag to detect. This is why unlock (v0.7) is
 possible at all, and it is also why the same device can drive an ordinary
 desktop session.
 
@@ -142,7 +142,7 @@ Everything above is a default and is overridable, same as bindings.
   equivalent because hundreds of pixels per second clears one whole pixel per
   tick immediately.
 
-## Unlock module (v0.5)
+## Unlock module (v0.7)
 
 **Opt-in, off by default, with a blunt security warning.** It requires a
 digits-only login password, which is a real security downgrade — the README
