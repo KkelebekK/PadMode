@@ -147,11 +147,10 @@ class WindowsConfig:
     #: Minimize the overlay when returning to the window you came from. On by
     #: default, because a visible overlay under the cursor takes focus straight
     #: back under focus-follows-mouse -- measured on a real game, 460ms after
-    #: we handed focus over. It also guarantees the game is unobscured.
-    #: Turn it off if you would rather the overlay stayed on screen; note that
-    #: an app which minimizes to the system tray will vanish rather than
-    #: minimize, and padmode can still find and raise it, but you will not see
-    #: it in the taskbar.
+    #: we handed focus over. It also guarantees the game is unobscured, and a
+    #: minimized window is still found by class, so the next press raises the
+    #: app rather than starting a second copy. Turn it off if you would rather
+    #: the overlay stayed on screen.
     minimize_on_return: bool = True
     #: Move the cursor onto the overlay window (gotcha §6.3). Off by default:
     #: it only matters under focus-follows-mouse, which is not the default on

@@ -278,11 +278,6 @@ and quietly ignoring half your bindings.
 - **Overlays need a window backend.** No `kdotool`/`xdotool`, or GNOME on
   Wayland, means the overlay buttons do nothing and say so once at startup.
   Nothing else is affected.
-- **Apps that minimize to the system tray vanish instead of minimizing.** The
-  overlay is minimized when you return to your game, and a few apps are
-  configured to hide to the tray when minimized. padmode still finds and raises
-  them, so overlays keep working — but if you would rather nothing was
-  minimized, set `minimize_on_return = false`.
 - **`park_pointer` is unproven.** No compositor here can place the cursor, so
   padmode drives its own pointer and corrects until it arrives. It is off by
   default, only matters with `minimize_on_return = false`, and gives up rather

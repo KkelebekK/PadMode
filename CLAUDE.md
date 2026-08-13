@@ -185,6 +185,12 @@ and v0.2 are *universally useful on their own*.
   4. Only then form a theory, and say plainly which observation rules out the
      alternatives.
 
+  **This covers the docs as well as the code.** A caveat nobody has observed is
+  a guess with a confident voice, and it outlives the conversation that made it
+  up. v0.3.2 shipped a warning about apps minimizing to the system tray while
+  the test output on screen showed the opposite; it was removed one commit
+  later. Write down what happened, not what might.
+
 ---
 
 ## 5. Testing

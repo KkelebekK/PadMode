@@ -188,10 +188,14 @@ it — **KWin still returns a minimized window from `search --class`**, so the
 next press raises that window instead of launching a second copy of the app.
 `windowactivate` restores and focuses it in one call.
 
-The caveat to keep in the README: an application configured to *minimize to the
-system tray* will disappear from the taskbar rather than minimize normally.
-padmode can still find and raise it, so overlays keep working, but users who
-dislike it can set `minimize_on_return = false`.
+`minimize_on_return = false` restores the old behaviour for anyone who would
+rather the overlay stayed on screen.
+
+An earlier draft of this section warned that apps set to *minimize to the system
+tray* would vanish instead. That was written from plausibility, not
+observation — and the Discord test above had already shown the opposite on this
+machine. It has been removed. If some app ever does behave that way, trace it
+and write down what actually happened; do not restore a guess.
 
 ## Parking the cursor (`park_pointer`)
 
@@ -328,4 +332,4 @@ Everything above, plus:
 
 - [ ] `padmode windows` picks the `x11` backend on an X11 session, even on KDE.
 - [ ] `find_window` does not match an invisible window of the right class
-      (start the app, close its window to the tray, press the combo).
+      (start the app, hide its window however that app allows, press the combo).
