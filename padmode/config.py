@@ -39,12 +39,16 @@ DEFAULT_BINDINGS: dict[str, str] = {
 DEFAULT_MODIFIER = "GUIDE"
 DEFAULT_VOLUME_STEP = 5
 
-#: A binding value is either a built-in action id, an argv list to exec, or
-#: ``overlay.<name>`` naming a declared overlay.
+#: A binding value is either a built-in action id, an argv list to exec,
+#: ``overlay.<name>`` naming a declared overlay, or ``frontend``.
 Binding = str | list[str]
 
 #: Marks a binding as "open this overlay" rather than "run this action".
 OVERLAY_PREFIX = "overlay."
+
+#: Marks a binding as "go back to the frontend". Not in :data:`ACTIONS`
+#: because it is not a command to run: it is a window to hand the pad back to.
+FRONTEND_BINDING = "frontend"
 
 
 def overlay_name(binding: Binding) -> str | None:
@@ -52,6 +56,11 @@ def overlay_name(binding: Binding) -> str | None:
     if isinstance(binding, str) and binding.startswith(OVERLAY_PREFIX):
         return binding[len(OVERLAY_PREFIX):]
     return None
+
+
+def is_frontend(binding: Binding) -> bool:
+    """True if this binding means "go home to the frontend"."""
+    return binding == FRONTEND_BINDING
 
 #: Desktop-mode defaults: gamepad drives the pointer and keyboard.
 DEFAULT_DESKTOP_BINDINGS: dict[str, str] = {
@@ -131,6 +140,25 @@ class Overlay:
 
 
 @dataclass(frozen=True)
+class Frontend:
+    """The game frontend: where the pad goes when there is nowhere else.
+
+    Two jobs, and they deliberately do not behave the same way:
+
+    * a button bound to ``frontend`` raises it, and **may start it** if it is
+      not running;
+    * a return from an overlay whose window has died lands here, and **never
+      starts anything** -- a game crashing is no reason for the daemon to spawn
+      a process behind the user's back.
+    """
+
+    #: Matched against the window class, case-insensitively, as a regex.
+    window_class: str
+    #: Argv to start it. Used only by the binding, never by the fallback.
+    command: list[str] | None = None
+
+
+@dataclass(frozen=True)
 class WindowsConfig:
     """Window backend selection, and the timing overlay mode depends on."""
 
@@ -170,6 +198,10 @@ class Config:
     #: Overlay name -> definition. Empty by default: an overlay needs an app,
     #: and we do not know which apps anyone has.
     overlays: dict[str, Overlay] = field(default_factory=dict)
+    #: The game frontend, if one is configured. None by default for the same
+    #: reason as overlays: we do not know which frontend anyone runs, and the
+    #: core is frontend-agnostic (CLAUDE.md §2).
+    frontend: Frontend | None = None
 
     def action_for(self, name: str) -> Binding | None:
         """Binding attached to a canonical button name, if any."""
@@ -242,16 +274,19 @@ def parse(data: dict[str, Any]) -> Config:
             raise ConfigError("general.volume_step must be an integer from 1 to 100")
         cfg = replace(cfg, volume_step=step)
 
-    # Overlays first: a binding may name one, so they have to exist before the
-    # bindings that refer to them can be checked.
+    # Overlays and the frontend first: a binding may name either, so both have
+    # to exist before the bindings that refer to them can be checked.
     cfg = replace(
         cfg,
         windows=_parse_windows(_table(data, "windows")),
         overlays=_parse_overlays(_table(data, "overlays")),
+        frontend=_parse_frontend(_table(data, "frontend"), "frontend" in data),
     )
     cfg = replace(
         cfg,
-        bindings=_parse_bindings(_table(data, "bindings"), cfg.modifier, cfg.overlays),
+        bindings=_parse_bindings(
+            _table(data, "bindings"), cfg.modifier, cfg.overlays, cfg.frontend
+        ),
     )
     cfg = replace(cfg, desktop=_parse_desktop(_table(data, "desktop"), cfg))
     return cfg
@@ -330,6 +365,36 @@ def _parse_overlays(table: dict[str, Any]) -> dict[str, Overlay]:
             command=list(command) if command else None,
         )
     return overlays
+
+
+def _parse_frontend(table: dict[str, Any], declared: bool) -> Frontend | None:
+    """Parse ``[frontend]``. Absent is fine; present and empty is a mistake."""
+    if not declared:
+        return None
+    _reject_unknown(table, {"class", "command"}, "frontend")
+
+    window_class = table.get("class")
+    if not isinstance(window_class, str) or not window_class.strip():
+        raise ConfigError(
+            "frontend.class must be a non-empty string matching your frontend's "
+            'window class, e.g. class = "pegasus". '
+            "`padmode windows` prints the class of the focused window."
+        )
+
+    command = table.get("command")
+    if command is not None and (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(part, str) for part in command)
+    ):
+        raise ConfigError(
+            "frontend.command must be a non-empty list of strings, e.g. "
+            'command = ["pegasus-fe"]. It is used only by a button bound to '
+            '"frontend"; the return-target fallback never starts it.'
+        )
+    return Frontend(
+        window_class=window_class, command=list(command) if command else None
+    )
 
 
 def _reject_unknown(table: dict[str, Any], known: set[str], section: str) -> None:
@@ -448,7 +513,10 @@ def _validate_desktop_action(name: str, value: str) -> None:
 
 
 def _parse_bindings(
-    table: dict[str, Any], modifier: str, overlays: dict[str, Overlay]
+    table: dict[str, Any],
+    modifier: str,
+    overlays: dict[str, Overlay],
+    frontend: Frontend | None = None,
 ) -> dict[str, Binding]:
     """Merge user bindings over the defaults.
 
@@ -473,7 +541,7 @@ def _parse_bindings(
         if value is False:
             merged.pop(name, None)
             continue
-        merged[name] = _validate_binding(name, value, overlays)
+        merged[name] = _validate_binding(name, value, overlays, frontend)
 
     if modifier in merged:
         raise ConfigError(
@@ -483,8 +551,13 @@ def _parse_bindings(
     return merged
 
 
-def _validate_binding(name: str, value: Any, overlays: dict[str, Overlay]) -> Binding:
-    """A binding is a known action id, a declared overlay, or an argv list."""
+def _validate_binding(
+    name: str,
+    value: Any,
+    overlays: dict[str, Overlay],
+    frontend: Frontend | None = None,
+) -> Binding:
+    """A binding is an action id, an overlay, the frontend, or an argv list."""
     if isinstance(value, str):
         overlay = overlay_name(value)
         if overlay is not None:
@@ -495,8 +568,17 @@ def _validate_binding(name: str, value: Any, overlays: dict[str, Overlay]) -> Bi
                     f"Declare it with [overlays.{overlay}] -- {declared}"
                 )
             return value
+        if is_frontend(value):
+            if frontend is None:
+                raise ConfigError(
+                    f"bindings.{name}: no frontend is configured. Declare one "
+                    'with:\n  [frontend]\n  class = "pegasus"'
+                )
+            return value
         if value not in ACTIONS:
             known = sorted(ACTIONS) + [f"{OVERLAY_PREFIX}{o}" for o in sorted(overlays)]
+            if frontend is not None:
+                known.append(FRONTEND_BINDING)
             raise ConfigError(
                 f"bindings.{name}: unknown action {value!r}. "
                 f"Known: {', '.join(known)}"

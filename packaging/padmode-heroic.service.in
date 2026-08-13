@@ -1,0 +1,18 @@
+[Unit]
+Description=Regenerate frontend metadata from the Heroic library
+Documentation=https://github.com/kelebek/padmode
+
+[Service]
+Type=oneshot
+
+# Heroic writes its store cache in more than one step, so the file we were
+# woken for may still be half-written. Reading it too early gets a partial
+# library. The generator survives that -- an unparseable store is skipped, and
+# an empty result refuses to overwrite good metadata -- but the result would be
+# a library missing whichever store was mid-write, so we wait instead.
+ExecStartPre=/usr/bin/sleep 3
+ExecStart=@PADMODE@ metadata heroic
+
+# Art downloads are the slow part, and they are skipped once the art is on
+# disk. A cold first run over a large library is the case this allows for.
+TimeoutStartSec=600

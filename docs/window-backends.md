@@ -144,6 +144,8 @@ Leaving (the same exit button as desktop mode):
 4. Minimize the overlay.
 5. Put the cursor back, if it was parked.
 6. Re-activate the remembered window.
+7. Check that focus actually landed there, and fall back to the frontend if it
+   did not. Only when a `[frontend]` is configured — see below.
 
 Step 2 before step 6 is gotcha §6.1, and it is not optional: a still-held
 return button leaking a raw gamepad event into the newly focused window is what
@@ -164,8 +166,73 @@ Things that follow from this design and are easy to get wrong later:
 
 ### Exclusive fullscreen
 
-Cannot be overlaid, per gotcha §6.2. Borderless windowed is a requirement, not
-a suggestion — do not try to work around it.
+Not a blocker. See "Exclusive fullscreen, and how to tell" below, which
+replaced an earlier claim here that it could not be overlaid — that claim came
+from the X11 setup this project replaces and was measured false on KWin
+Wayland.
+
+## When the window we came from is gone (v0.4)
+
+A window id outlives its window. Measured on Plasma 6.7, with two invented
+UUIDs:
+
+```
+$ kdotool windowactivate '{00000000-0000-0000-0000-000000000000}'; echo $?
+0
+$ kdotool getwindowclassname '{00000000-0000-0000-0000-000000000000}'; echo $?
+0
+```
+
+Both print nothing and exit 0. So when a game exits while its overlay is up,
+the return activates a dead id, reports success, and leaves the user on the
+desktop holding a gamepad — and, importantly, **the obvious guard does not
+work either**: asking whether the id still resolves is exactly as blind as
+activating it.
+
+What is left is to look at the outcome. After activating, the daemon reads
+`get_active_window()` and compares. That needs only the required three
+operations, so every backend gets the fallback, present and future.
+
+- Checked up to `RETURN_VERIFY_ATTEMPTS` times (3) at `RETURN_VERIFY_DELAY`
+  (150 ms) apart, passing as soon as focus matches.
+- Runs **only if `[frontend]` is configured**. There is nowhere to fall back to
+  otherwise, and it would be a subprocess per return for no benefit.
+- Never starts the frontend. The frontend *button* may; a game crashing may
+  not.
+- The go-home path is not itself verified: it activates a window found a
+  moment earlier, and falling back to the frontend when the frontend did not
+  focus is at best pointless.
+
+### What those two numbers are based on
+
+Measured on Plasma 6.7, KWin Wayland, no gamepad involved — activate a window,
+then poll `getactivewindow` until it agrees:
+
+| Workload | Focused on first ask | Latency |
+|---|---|---|
+| 15 activations, 1 s apart, application windows | **15 / 15** | 3.0–6.2 ms |
+| 20 activations back-to-back, as fast as subprocesses allow | 19 / 20 | 2.2–5.3 ms |
+
+Latency includes the subprocess round trip, so it is the cost padmode actually
+pays, not a lower bound it cannot reach. 150 ms is roughly 25x the worst case
+observed: the first look is not a race.
+
+Two things this measurement corrected, both of which had already produced a
+confident wrong theory before the numbers arrived:
+
+- **Panels are not windows you can focus.** `search` returns plasmashell
+  surfaces alongside real windows, and activating one fails permanently —
+  re-activating never helped in 5 attempts. Every miss in a paced run was a
+  panel. The first draft of this section blamed a "1-in-20 compositor flake"
+  that did not exist.
+- **…but the back-to-back run really did drop one activation on a real
+  application window.** That is why the check retries rather than concluding
+  from one look. The daemon activates once per return, seconds apart, which is
+  the paced row — but retries are three cheap subprocesses against a failure
+  mode that dumps the user somewhere they did not ask to be.
+
+What is still unmeasured is the whole path with a gamepad: a real overlay over
+a real game whose process then exits. That is on the checklist below.
 
 ## Minimizing on return, and why it is the default
 
@@ -327,6 +394,29 @@ systemctl --user stop padmode.service; pkill -f 'python -m padmode'
 - [ ] **Second monitor.** Overlay an app that lives on another screen.
 - [ ] **Kill the daemon mid-settle** (exit the overlay, then Ctrl-C within
       0.7 s): focus still returns.
+- [x] **The game exits while the overlay is up.** *Verified v0.4, Plasma 6.7,
+      real pad, Pegasus as the frontend.* Overlaid Discord over a stand-in
+      window, killed that window, pressed exit: the log read `did not take
+      focus … falling back to the frontend` and `watch_focus.py` confirmed
+      Pegasus became active.
+- [x] **A return that works is left alone.** *Verified:* the same
+      overlay-and-return with the target alive logged `returning to` and no
+      fallback line.
+- [ ] **The verification timing under a real game.** Measured at 3–6 ms
+      between windows on an idle desktop (above), and the four live returns
+      below all matched without exhausting the retries — but never against an
+      actual game under load. Trace it with `watch_focus.py`; if a healthy
+      return routinely needs a second look, raise `RETURN_VERIFY_DELAY`.
+- [x] **The frontend button** (`SELECT = "frontend"`). *Verified:* raises the
+      frontend and hands the pad back.
+- [x] **Holding the exit button through a return, with the frontend as the
+      target.** *Verified* against the application this gotcha was written
+      about: held Guide for ~3 s while leaving an overlay stacked over
+      Pegasus; Pegasus took focus and its pid was unchanged — it did not
+      crash.
+- [x] **The frontend button with the frontend closed**, when a `command` is
+      configured. *Verified:* `pegasus-fe` was started and raised once its
+      window appeared.
 - [ ] **No backend.** Set `[windows] backend = "none"`, start the daemon: one
       warning at startup, overlay buttons do nothing, everything else works.
 - [ ] With `park_pointer = true`: the cursor lands on the overlay window and

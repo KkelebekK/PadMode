@@ -210,8 +210,8 @@ class FakeVirtual:
 class DaemonFixture(unittest.TestCase):
     """Builds a daemon whose every collaborator is fake, on a fake clock."""
 
-    def build(self, config=None, *, backend="default", virtual_gain=1.0,
-              runner_ok=True, script=None, **backend_kwargs):
+    def build(self, config=None, *, backend="default", backend_cls=None,
+              virtual_gain=1.0, runner_ok=True, script=None, **backend_kwargs):
         self.log: list = []
         self.clock = FakeClock()
         patcher = mock.patch.object(daemon_module, "time", self.clock)
@@ -220,7 +220,9 @@ class DaemonFixture(unittest.TestCase):
 
         self.config = config or overlay_config()
         if backend == "default":
-            backend = FakeBackend(self.log, **backend_kwargs)
+            # backend_cls exists so a test can vary how the compositor behaves
+            # while keeping the shared log, which is created here.
+            backend = (backend_cls or FakeBackend)(self.log, **backend_kwargs)
         self.backend = backend
         self.reader = (
             FakeReader(self.log) if script is None

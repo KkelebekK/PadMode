@@ -9,11 +9,11 @@ screen with the pad.
 `WeHaveSteamMachineAtHome` (a joke); do not use "Steam Machine" or other Valve
 product names in the shipped tool, package, or docs.
 
-**Status: v0.3.3** (Guide-hold media/volume/mic; uinput virtual
+**Status: v0.4.0** (Guide-hold media/volume/mic; uinput virtual
 mouse/keyboard; desktop mode with bindable stick directions; window backends
-and overlay mode with return-to-game; 283 tests). This document is the
-contract. If something here is wrong, fix this file in the same change as the
-code.
+and overlay mode with return-to-game; frontend integration and the Heroic
+metadata generator; 352 tests). This document is the contract. If something
+here is wrong, fix this file in the same change as the code.
 
 ---
 
@@ -44,7 +44,7 @@ is no longer a second implementation to consult or stay compatible with.
 | Frontend | **Agnostic.** Core knows nothing about Pegasus; frontends are config |
 | Bindings | **Good defaults, fully overridable** via config |
 | Unlock feature | **In-repo, opt-in, off by default**, with a blunt security warning |
-| Metadata generators | **Same repo, separate command.** Never imported by the daemon |
+| Metadata generators | **Same repo, own subcommand** (`padmode metadata …`), imported lazily by the CLI and **never by the daemon** — enforced by a test, not by good intentions |
 | Packaging | **AUR + `install.sh`** |
 | Installer scope | **Both**: prompted, explained DE changes *and* a printed manual-steps mode for people who won't run them |
 | License | **GPL-3.0** (ecosystem fit — input-remapper, KDE, evdev tooling are GPL) |
@@ -124,14 +124,37 @@ KDE box and a GNOME laptop should still run on both.
 Detail, including the tools' output formats and the manual checklist, is in
 `docs/window-backends.md`.
 
-### 3.4 Roadmap
+### 3.4 The frontend
+
+Configured in `[frontend]` (a window class, and optionally a command), and used
+for two things:
+
+- **A binding.** `SELECT = "frontend"` raises it and hands the pad *back* —
+  it is not a mode, because the frontend reads the gamepad itself. It **may
+  start** the frontend if it is not running.
+- **The return-target fallback.** A window id outlives its window (§6.6), so
+  when the game exits while an overlay is up, the return activates a dead id
+  and strands the user on the desktop holding a controller. After every return
+  we check where focus actually landed and, if it is not where we sent it, go
+  to the frontend instead. This path **never starts anything**: a game crashing
+  is not a reason to spawn a process on the user's behalf.
+
+Checking the outcome rather than testing the id for liveness is deliberate: it
+needs only `get_active_window`, which every backend must implement anyway, and
+it measures the thing we care about. Both timing and the activation itself are
+deferred exactly as an overlay return is, so §6.1's ordering still holds.
+
+Core stays frontend-agnostic: nothing here knows what Pegasus is.
+
+### 3.5 Roadmap
 
 | Version | Contents | Compositor dependency |
 |---|---|---|
 | ~~**v0.1**~~ ✅ | evdev reader, Guide-hold media/volume/mic, config, systemd unit, udev rule, `install.sh` | **None** — works on every Linux desktop |
 | ~~**v0.2**~~ ✅ | uinput virtual device, desktop mode (pad as mouse), return button | **None** — confirmed: no window code was needed |
 | ~~**v0.3**~~ ✅ | Window backends, overlay mode, return-to-game | KDE + X11 |
-| **v0.4** | Frontend integration (return target), metadata generators | KDE + X11 |
+| ~~**v0.4**~~ ✅ | Frontend integration (return target), Heroic metadata generator | KDE + X11 |
+| **v0.4.1** | Steam metadata generator (specified, not built) | None |
 | **v0.5** | Unlock module (opt-in, off by default) | Screensaver D-Bus |
 
 Do not pull work earlier in this list. The point of the ordering is that v0.1
@@ -276,6 +299,17 @@ Learned the hard way; re-learning them is expensive.
    Relevant to the printed manual instructions, not to our code.
 5. **Gamepads re-enumerate.** The read loop must survive the device vanishing
    and reappearing; reconnect rather than exit.
+6. **A window id outlives its window, silently.** Measured on Plasma 6.7 with
+   two invented UUIDs: `kdotool windowactivate <dead id>` exits **0**, prints
+   nothing and does nothing — and `getwindowclassname <dead id>` does exactly
+   the same. So every "did it work?" signal a subprocess backend has says yes,
+   *and* the obvious pre-check ("ask whether the id still resolves") is just as
+   blind as the operation it was meant to guard. This is why overlay mode
+   cannot trust its remembered return target: if the game exits while the
+   overlay is up, the return "succeeds" and leaves the user on the desktop
+   holding a controller. The only reliable signal is where focus actually ended
+   up afterwards, which is what §3.4 checks. Assume the same of any backend
+   operation that takes an id.
 
 ---
 
@@ -297,13 +331,22 @@ padmode/
   windows/kwin.py           # kdotool
   windows/x11.py            # xdotool
   windows/__init__.py       # session detection
+  metadata/heroic.py        # Heroic library -> metadata; never imported above
+  metadata/pegasus.py       # the Pegasus writer
+  metadata/steam.py         # *v0.4.1*, specified in docs/
   modes/                    # *later* split out of daemon.py when it earns it
-contrib/metadata/           # *v0.4* heroic2pegasus, steam2pegasus
-packaging/                  # udev rule, systemd unit template; *PKGBUILD*
+packaging/                  # udev rule, systemd units; *PKGBUILD*
 tests/                      # unit + synthetic-uinput integration
 docs/
 install.sh
 ```
+
+`metadata/` sits inside the package because it is reached as `padmode metadata
+heroic`, but it is not part of the daemon in any other sense: nothing outside
+`__main__.cmd_metadata` may import it, and `tests/test_metadata.py` fails if
+anything does. That includes building the argument parser, which happens on
+every `padmode run` — so the CLI declares the generator's flags itself and the
+generator resolves them.
 
 `modes/` does not exist yet on purpose: overlay mode shares nearly all of its
 behaviour with desktop mode and differs only at the edges, so the two read
@@ -327,16 +370,17 @@ been removed, so nothing else competes for the gamepad any more.
 - Auto-lock at login is still configured (`lock-at-login.sh`) and is unrelated
   to this project. Leave it alone.
 
-## 9. Reference for unbuilt work
+## 9. Reference
 
-Detail for later versions lives in `docs/`, so this file stays a contract
-rather than a spec dump. Both were distilled from a working implementation;
-prefer them over re-deriving:
+Detail lives in `docs/`, so this file stays a contract rather than a spec dump.
+These were distilled from a working implementation; prefer them over
+re-deriving:
 
 - `docs/virtual-input.md` — v0.2 desktop mode and the v0.5 unlock module.
-- `docs/window-backends.md` — v0.3 backends, overlay sequencing, cursor
-  parking, and the manual checklist §5 requires.
-- `docs/metadata-generators.md` — v0.4 Heroic and Steam library scraping.
+- `docs/window-backends.md` — backends, overlay sequencing, the return
+  fallback, cursor parking, and the manual checklist §5 requires.
+- `docs/metadata-generators.md` — the Heroic generator as built, and the Steam
+  one as specified.
 
 ## 10. Open items
 

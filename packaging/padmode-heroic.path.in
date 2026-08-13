@@ -1,0 +1,14 @@
+[Unit]
+Description=Watch the Heroic library for installs and removals
+Documentation=https://github.com/kelebek/padmode
+
+[Path]
+# One file per store: Epic, GOG, Amazon. @HEROIC_CACHE@ is substituted by
+# install.sh, because Heroic's config lives in a different place when it is
+# installed as a Flatpak.
+PathChanged=@HEROIC_CACHE@/legendary_library.json
+PathChanged=@HEROIC_CACHE@/gog_library.json
+PathChanged=@HEROIC_CACHE@/nile_library.json
+
+[Install]
+WantedBy=default.target

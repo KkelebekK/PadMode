@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import buttons
-from .config import Binding, Config, Overlay, overlay_name
+from .config import Binding, Config, Frontend, Overlay, is_frontend, overlay_name
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +34,21 @@ SETTLE_TICK = 0.05
 #: one short-lived process, so this trades a little latency for staying well
 #: clear of spawning one 60 times a second.
 LAUNCH_POLL = 0.25
+
+#: Checking that focus actually landed where we sent it: how long to wait
+#: before the first look, and how many looks before concluding it did not.
+#: Only used when a frontend is configured.
+#:
+#: Measured on KWin Wayland (Plasma 6.7): 15 paced activations of real
+#: application windows all took focus on the first ask, 3.0-6.2 ms after
+#: `windowactivate` returned, subprocess round trip included. So the first look
+#: is deliberately ~25x the worst observed case. The retries are not for that
+#: latency -- they are for the one activation in ~20 that was dropped when
+#: switching windows back-to-back as fast as subprocesses allow, which is not
+#: how the daemon behaves but is cheap to be wrong about. See
+#: docs/window-backends.md.
+RETURN_VERIFY_DELAY = 0.15
+RETURN_VERIFY_ATTEMPTS = 3
 
 #: Closed-loop cursor parking: how many move-and-look rounds to try, how close
 #: counts as arrived, and how long to let the compositor digest a move before
@@ -128,10 +143,18 @@ class Decision:
     mode: Mode | None = None
     #: Name of the overlay to open, when entering overlay mode.
     overlay: str | None = None
+    #: Go back to the configured frontend. Not a mode change: the pad is handed
+    #: *back*, so this only says where focus should end up once it is free.
+    frontend: bool = False
 
     def __bool__(self) -> bool:
         return bool(
-            self.grab or self.binding or self.virtual or self.mode or self.overlay
+            self.grab
+            or self.binding
+            or self.virtual
+            or self.mode
+            or self.overlay
+            or self.frontend
         )
 
 
@@ -207,6 +230,12 @@ def decide(
         state.mode = Mode.OVERLAY
         state.reset_inputs()
         return Decision(mode=Mode.OVERLAY, overlay=overlay)
+    if is_frontend(binding):
+        # Deliberately no mode change: the frontend drives itself from the pad,
+        # so going home means giving the device back rather than taking it
+        # over. We stay in GUIDE_HELD until the modifier is released, and the
+        # daemon defers the activation past that release (gotcha §6.1).
+        return Decision(frontend=True)
     return Decision(binding=binding)
 
 
@@ -470,6 +499,11 @@ def _vector_response(x: float, y: float, desktop) -> tuple[float, float]:
     return x / magnitude * scaled, y / magnitude * scaled
 
 
+def _label(spec: Overlay | Frontend) -> str:
+    """How a window spec is named in a log line."""
+    return "frontend" if isinstance(spec, Frontend) else f"overlay {spec.name}"
+
+
 class Daemon:
     """Wires the pure state machine to a real device and real subprocesses."""
 
@@ -488,10 +522,24 @@ class Daemon:
         self._overlay_window = None
         #: Where the cursor was before we parked it, so it can be put back.
         self._parked_from: tuple[int, int] | None = None
-        #: ``(overlay, deadline, next poll)`` while waiting for a launched app.
-        self._pending_launch: tuple[Overlay, float, float] | None = None
+        #: ``(spec, deadline, next poll)`` while waiting for a launched app.
+        #: The spec is an :class:`Overlay` or the :class:`Frontend`; both carry
+        #: a window class and a command, which is all the polling needs.
+        self._pending_launch: tuple[Overlay | Frontend, float, float] | None = None
         #: When the deferred return-to-game is due.
         self._pending_return: float | None = None
+        #: Whether that return is worth checking up on afterwards. Only a
+        #: return *to a remembered window* can find that window gone.
+        self._verify_return = False
+        #: ``(window we asked for, when to look, looks left)`` after activating.
+        self._pending_verify: tuple[str, float, int] | None = None
+        #: Where "go home" is heading. Deliberately *not* ``_return_to``: an
+        #: overlay opened in between overwrites that with the window it must go
+        #: back to, which would quietly redirect the frontend button.
+        self._home_to = None
+        #: The frontend button was pressed while the pad is still grabbed, so
+        #: the activation is waiting for the release.
+        self._home_pending = False
         self._warned_park = False
 
     @property
@@ -505,12 +553,13 @@ class Daemon:
         makes the machine unusable by controller, which is the worst failure
         mode this app has (CLAUDE.md §4).
         """
-        # Overlay bindings name an overlay, not an external command, so they
-        # are checked separately rather than confusing the action runner.
+        # Overlay and frontend bindings name a window, not an external command,
+        # so they are checked separately rather than confusing the action
+        # runner -- which would otherwise report them as a missing binary.
         self._runner.preflight({
             name: binding
             for name, binding in self._config.bindings.items()
-            if overlay_name(binding) is None
+            if overlay_name(binding) is None and not is_frontend(binding)
         })
         self._preflight_overlays()
         log.info(
@@ -551,8 +600,12 @@ class Daemon:
         # changes from needlessly tearing down the tick and virtual devices.
         entering = decision.mode in PAD_MODES and was not in PAD_MODES
         leaving = was in PAD_MODES and decision.mode not in (None, *PAD_MODES)
-        if entering and not self._enter(decision):
-            return
+        if entering:
+            if not self._enter(decision):
+                return
+            # Opening a pad-driven mode supersedes a "go home" that has not
+            # fired yet: the user has since asked for something else.
+            self._home_pending = False
         if leaving:
             self._leave(was)
 
@@ -560,9 +613,16 @@ class Daemon:
             self._reader.grab()
         elif decision.grab is Grab.RELEASE:
             self._reader.ungrab()
+            if self._home_pending:
+                # The pad is free as of this instant, which is exactly what the
+                # frontend activation was waiting for.
+                self._home_pending = False
+                self._defer_return(verify=False)
 
         if decision.binding is not None:
             self._runner.run(decision.binding)
+        if decision.frontend:
+            self._go_home()
         for op in decision.virtual:
             self._apply(op)
 
@@ -663,9 +723,20 @@ class Daemon:
                 overlay, now + self._config.windows.launch_timeout, now + LAUNCH_POLL
             )
 
-        # A new overlay supersedes a return that is still pending from the
-        # last one; otherwise it would fire mid-overlay and yank focus away.
+        # A new overlay supersedes a return that is still pending from the last
+        # one, and anything the frontend button set in motion; otherwise either
+        # would fire mid-overlay and yank focus away. Done here, at the point
+        # the entry is committed, so an overlay that *refused* leaves a pending
+        # "go home" alone -- nothing opened, so the earlier request stands. The
+        # isinstance check is what keeps this from eating the launch this
+        # overlay may have just started a few lines above.
         self._pending_return = None
+        self._home_to = None
+        self._home_pending = False
+        if self._pending_launch is not None and isinstance(
+            self._pending_launch[0], Frontend
+        ):
+            self._pending_launch = None
         self._reader.set_tick(TICK_INTERVAL)
         if target is not None:
             self._show(overlay, target)
@@ -680,6 +751,12 @@ class Daemon:
         """
         self._state.mode = Mode.IDLE
         self._state.reset_inputs()
+        # This releases the pad below, and a "go home" waiting for exactly that
+        # release is now due. A refused overlay opened nothing, so the earlier
+        # request still stands.
+        if self._home_pending:
+            self._home_pending = False
+            self._defer_return(verify=False)
         # A return already in flight survives a refused entry: failing to open
         # a second overlay is no reason to strand the user on the first, nor to
         # forget which window that return still has to put away.
@@ -697,26 +774,41 @@ class Daemon:
             self._poll_launch(now)
         if self._pending_return is not None and now >= self._pending_return:
             self._finish_return()
+        if self._pending_verify is not None:
+            self._check_return(now)
 
     def _poll_launch(self, now: float) -> None:
-        """Watch for the window of an app we started, until it or time runs out."""
-        overlay, deadline, next_poll = self._pending_launch
+        """Watch for the window of an app we started, until it or time runs out.
+
+        Serves both the overlay and the frontend button, which want the same
+        thing (wait for a class to appear) and different things once it does:
+        an overlay is raised now, the frontend only once the pad is free.
+        """
+        spec, deadline, next_poll = self._pending_launch
         if now < next_poll:
             return
-        target = self._windows.find_window(overlay.window_class) if self._windows else None
+        target = self._windows.find_window(spec.window_class) if self._windows else None
         if target is not None:
             self._pending_launch = None
-            self._show(overlay, target)
+            if isinstance(spec, Frontend):
+                self._arm_home(target)
+            else:
+                self._show(spec, target)
             return
         if now >= deadline:
             self._pending_launch = None
             log.warning(
-                "overlay %s: %s opened no window matching class %r within %.0fs",
-                overlay.name, overlay.command[0] if overlay.command else "?",
-                overlay.window_class, self._config.windows.launch_timeout,
+                "%s: %s opened no window matching class %r within %.0fs",
+                _label(spec), spec.command[0] if spec.command else "?",
+                spec.window_class, self._config.windows.launch_timeout,
             )
+            # Giving up is the end of the work, and outside a pad-driven mode
+            # nothing else is keeping the heartbeat alive. Without this the
+            # frontend button leaves the daemon ticking 20 times a second for
+            # the rest of the session.
+            self._idle_tick()
             return
-        self._pending_launch = (overlay, deadline, now + LAUNCH_POLL)
+        self._pending_launch = (spec, deadline, now + LAUNCH_POLL)
 
     def _show(self, overlay: Overlay, window_id) -> None:
         if self._windows is None:
@@ -744,13 +836,28 @@ class Daemon:
         ):
             self._return_to = self._parked_from = None
             return
+        self._defer_return(verify=True)
+
+    def _defer_return(self, verify: bool) -> None:
+        """Activate ``self._return_to`` once ``settle`` has passed.
+
+        Shared by the two things that hand focus somewhere the pad is about to
+        belong to: leaving an overlay, and the frontend button. They differ
+        only in ``verify`` -- a return to a *remembered* window can find that
+        window gone, whereas the frontend was looked up a moment ago.
+        """
+        self._verify_return = verify
         self._pending_return = time.monotonic() + self._config.windows.settle
         self._reader.set_tick(SETTLE_TICK)
 
     def _finish_return(self) -> None:
         self._pending_return = None
         overlay, self._overlay_window = self._overlay_window, None
-        going_back = self._windows is not None and self._return_to is not None
+        # When both are pending, "go home" wins: it is the later request, and
+        # it is the one the user made on purpose.
+        target = self._return_to if self._home_to is None else self._home_to
+        self._home_to = None
+        going_back = self._windows is not None and target is not None
 
         # Get the overlay off the screen first, and always. Under
         # focus-follows-mouse a visible overlay under the cursor takes focus
@@ -771,11 +878,129 @@ class Daemon:
             origin, self._parked_from = self._parked_from, None
             self._warp(*origin)
         if going_back:
-            log.info("returning to %s", self._return_to)
-            self._windows.activate_window(self._return_to)
+            log.info("returning to %s", target)
+            self._windows.activate_window(target)
+            if self._verify_return and self._config.frontend is not None:
+                # Costs one extra call, and only for people who configured a
+                # frontend to fall back to. Everyone else pays nothing.
+                self._pending_verify = (
+                    target,
+                    time.monotonic() + RETURN_VERIFY_DELAY,
+                    RETURN_VERIFY_ATTEMPTS,
+                )
         self._return_to = None
-        if self._state.mode not in PAD_MODES:
-            self._reader.set_tick(None)
+        self._verify_return = False
+        self._idle_tick()
+
+    def _idle_tick(self) -> None:
+        """Stop the heartbeat once nothing is waiting on it.
+
+        One place rather than several: the tick serves the pointer, launch
+        polling, the settle and the verification at once, and clearing it while
+        any of them is outstanding silently strands that one.
+        """
+        if self._state.mode in PAD_MODES:
+            return
+        if (
+            self._pending_launch is not None
+            or self._pending_return is not None
+            or self._pending_verify is not None
+        ):
+            return
+        self._reader.set_tick(None)
+
+    def _check_return(self, now: float) -> None:
+        """Did focus actually land where we sent it? If not, go home.
+
+        A window id outlives its window. When a game exits while the overlay is
+        up, ``kdotool windowactivate`` on the remembered id exits 0 and does
+        nothing at all, which leaves the user looking at the desktop holding a
+        gamepad -- the one failure this mode cannot recover from on its own.
+
+        Asking "does this id still exist" would need a new backend operation
+        and a different answer from every window tool. Asking *where focus
+        ended up* needs only ``get_active_window``, which every backend already
+        has to implement (CLAUDE.md §3.3), and measures the thing we actually
+        care about rather than a proxy for it.
+        """
+        target, due, attempts = self._pending_verify
+        if now < due:
+            return
+        active = self._windows.get_active_window() if self._windows else None
+        if active != target and attempts > 1:
+            self._pending_verify = (target, now + RETURN_VERIFY_DELAY, attempts - 1)
+            return
+        self._pending_verify = None
+        if active != target:
+            self._fall_back_home(target, active)
+        self._idle_tick()
+
+    def _fall_back_home(self, target, active) -> None:
+        frontend = self._config.frontend
+        if frontend is None or self._windows is None:  # unreachable
+            return
+        log.info(
+            "%s did not take focus (%s has it) -- treating it as gone and "
+            "falling back to the frontend", target, active or "nothing",
+        )
+        window = self._windows.find_window(frontend.window_class)
+        if window is None:
+            # Deliberately does not start it. A game exiting is not a reason to
+            # spawn a process on the user's behalf; the frontend button is.
+            log.warning(
+                "nothing matches the frontend class %r either, so there is "
+                "nowhere to go back to", frontend.window_class,
+            )
+            return
+        self._windows.activate_window(window)
+
+    # -- the frontend: going home (v0.4) --------------------------------
+    def _go_home(self) -> None:
+        """Hand the pad back to the frontend.
+
+        Not a mode: the frontend reads the gamepad itself, so the useful thing
+        is to give the device back rather than drive it with a virtual mouse.
+        That makes the timing identical to an overlay return -- the pad must be
+        released before the frontend takes focus (gotcha §6.1) -- so this only
+        works out *where* to go, and :meth:`_arm_home` handles *when*.
+        """
+        frontend = self._config.frontend
+        if frontend is None:  # unreachable via validated config
+            return
+        if self._windows is None:
+            log.warning(
+                "the frontend button needs a window backend and this session "
+                "has none"
+            )
+            return
+        window = self._windows.find_window(frontend.window_class)
+        if window is not None:
+            self._arm_home(window)
+            return
+        if not frontend.command:
+            log.info(
+                "frontend: nothing matches class %r and there is no command "
+                "to start it", frontend.window_class,
+            )
+            return
+        if not self._runner.run(frontend.command):
+            return  # the runner has already said why
+        now = time.monotonic()
+        self._pending_launch = (
+            frontend, now + self._config.windows.launch_timeout, now + LAUNCH_POLL
+        )
+        self._reader.set_tick(SETTLE_TICK)
+
+    def _arm_home(self, window) -> None:
+        """Send focus to ``window``, as soon as the pad is not ours."""
+        self._home_to = window
+        if self._state.mode is Mode.GUIDE_HELD:
+            # Still grabbed: the modifier is held down. Waiting for its release
+            # is what keeps the button's own release out of the frontend, which
+            # is the event that used to crash it.
+            self._home_pending = True
+            return
+        self._defer_return(verify=False)
 
     # -- cursor parking (gotcha §6.3) ----------------------------------
     def _park(self, window_id) -> None:
@@ -842,13 +1067,14 @@ class Daemon:
     def _preflight_overlays(self) -> None:
         """Say at startup what will not work, rather than on the first press."""
         overlays = self._config.overlays
-        if not overlays:
+        frontend = self._config.frontend
+        if not overlays and frontend is None:
             return
         if self._windows is None:
             log.warning(
-                "%d overlay(s) configured but this session has no window "
+                "%d overlay(s)%s configured but this session has no window "
                 "backend, so they are disabled",
-                len(overlays),
+                len(overlays), " and a frontend" if frontend is not None else "",
             )
             return
         for name, overlay in sorted(overlays.items()):
@@ -857,3 +1083,12 @@ class Daemon:
                     "overlay %s: %s is not installed, so it can only raise an "
                     "already-running window", name, overlay.command[0],
                 )
+        if (
+            frontend is not None
+            and frontend.command
+            and not self._runner.available(frontend.command[0])
+        ):
+            log.warning(
+                "frontend: %s is not installed, so the frontend button can "
+                "only raise an already-running window", frontend.command[0],
+            )

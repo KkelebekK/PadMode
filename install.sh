@@ -17,8 +17,27 @@ BIN_DIR="$HOME/.local/bin"
 BIN="$BIN_DIR/padmode"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 UNIT="$UNIT_DIR/padmode.service"
+HEROIC_PATH_UNIT="$UNIT_DIR/padmode-heroic.path"
+HEROIC_SERVICE_UNIT="$UNIT_DIR/padmode-heroic.service"
 UDEV_RULE="/etc/udev/rules.d/99-padmode.rules"
 MIN_PYTHON="3.11"
+
+# Heroic keeps its library cache in one of two places, depending on whether it
+# was installed natively or as a Flatpak. Prints the store_cache directory, or
+# nothing if Heroic is not installed.
+heroic_cache() {
+    local candidate
+    for candidate in \
+        "$HOME/.config/heroic" \
+        "$HOME/.var/app/com.heroicgameslauncher.hgl/config/heroic"
+    do
+        if [ -d "$candidate/store_cache" ]; then
+            printf '%s\n' "$candidate/store_cache"
+            return 0
+        fi
+    done
+    return 1
+}
 
 ASSUME_YES=0
 PRINT_ONLY=0
@@ -117,7 +136,20 @@ $(bold "Manual installation")
    systemctl --user daemon-reload
    systemctl --user enable --now padmode.service
 
-5. Check it:
+5. Optional -- regenerate frontend metadata when your Heroic library changes:
+
+   sed 's|@HEROIC_CACHE@|$HOME/.config/heroic/store_cache|' \\
+       "$SRC_DIR/packaging/padmode-heroic.path.in" > "$HEROIC_PATH_UNIT"
+   sed 's|@PADMODE@|$BIN|' \\
+       "$SRC_DIR/packaging/padmode-heroic.service.in" > "$HEROIC_SERVICE_UNIT"
+   systemctl --user daemon-reload
+   systemctl --user enable --now padmode-heroic.path
+
+   (Flatpak Heroic keeps its cache in
+   \$HOME/.var/app/com.heroicgameslauncher.hgl/config/heroic/store_cache
+   instead. Or just run 'padmode metadata heroic' by hand.)
+
+6. Check it:
 
    padmode devices
    systemctl --user status padmode.service
@@ -196,10 +228,36 @@ install_service() {
     fi
 }
 
+install_heroic() {
+    local cache
+    if ! cache="$(heroic_cache)"; then
+        return 0   # Heroic isn't installed; nothing to offer
+    fi
+    bold "5. Heroic library metadata (optional)"
+    echo "   Found Heroic: $cache"
+    echo "   padmode can regenerate your frontend's metadata whenever you"
+    echo "   install or remove a game, by watching that directory."
+    echo "   Installs $HEROIC_PATH_UNIT and .service"
+    echo "   Writes metadata and art to ~/Games/pegasus-heroic"
+    if confirm "   Install the metadata watcher?"; then
+        mkdir -p "$UNIT_DIR"
+        sed "s|@HEROIC_CACHE@|$cache|" \
+            "$SRC_DIR/packaging/padmode-heroic.path.in" > "$HEROIC_PATH_UNIT"
+        sed "s|@PADMODE@|$BIN|" \
+            "$SRC_DIR/packaging/padmode-heroic.service.in" > "$HEROIC_SERVICE_UNIT"
+        systemctl --user daemon-reload
+        systemctl --user enable --now padmode-heroic.path
+        echo "   done -- run it now with: padmode metadata heroic"
+    else
+        echo "   skipped -- run 'padmode metadata heroic' by hand when you like"
+    fi
+}
+
 uninstall() {
     bold "Uninstalling padmode"
     systemctl --user disable --now padmode.service 2>/dev/null || true
-    rm -f "$UNIT" "$BIN"
+    systemctl --user disable --now padmode-heroic.path 2>/dev/null || true
+    rm -f "$UNIT" "$BIN" "$HEROIC_PATH_UNIT" "$HEROIC_SERVICE_UNIT"
     rm -rf "${LIB_DIR:?}/padmode"
     systemctl --user daemon-reload 2>/dev/null || true
     echo "removed the service, launcher and package"
@@ -236,6 +294,7 @@ main() {
     install_udev
     install_group
     install_service
+    install_heroic
 
     echo
     bold "Done."

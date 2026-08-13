@@ -10,11 +10,13 @@ time.
 Then press Guide + L3 and the pad becomes a mouse and keyboard, so you can
 drive the whole desktop from the couch without reaching for either. Or bind a
 button to an app and have it come up *over* your game, with one press to send
-you straight back.
+you straight back — and another button to go home to your game frontend.
 
-> **Status: v0.3.** Media and volume control, a full desktop mode, and app
-> overlays that return you to the game. Everything except overlays still works
-> on every Linux desktop with no compositor involvement at all.
+> **Status: v0.4.** Media and volume control, a full desktop mode, app
+> overlays that return you to the game, a bindable frontend to land on when
+> the game is gone, and a metadata generator for Heroic libraries. Everything
+> except overlays still works on every Linux desktop with no compositor
+> involvement at all.
 
 `padmode` is a provisional name and may change before 1.0.
 
@@ -155,8 +157,43 @@ game. The app keeps running, so the next press raises it instantly.
 Don't know what to put in `class`? Focus the app and run `padmode windows`.
 
 Overlays are the one part of padmode that needs cooperation from your desktop.
-See [what works where](#what-works-where), and note that a game in **exclusive
-fullscreen cannot be overlaid** by anything — use borderless windowed.
+See [what works where](#what-works-where). Fullscreen games are fine — a
+fullscreen Steam game at 2560x1440 was overlaid and returned to on KWin
+Wayland. A game that keeps the compositor out of the loop entirely (its own
+gamescope session, say) may still refuse, so treat it as per-game: press the
+button and look.
+
+### Going home
+
+Tell padmode about your frontend and it gains a "home" button, and somewhere
+to put you when the game you were playing is gone:
+
+```toml
+[frontend]
+class = "pegasus"
+command = ["pegasus-fe"]   # optional
+
+[bindings]
+SELECT = "frontend"        # hold Guide, press Select
+```
+
+`class` is a case-insensitive regex, so `"pegasus"` matches Pegasus's actual
+window class, `org.pegasus-frontend.pegasus-fe`. Run `padmode windows` with
+your frontend focused if you use a different one.
+
+Pressing it raises the frontend and hands the pad *back* — the frontend reads
+the gamepad itself, so padmode gets out of the way rather than driving it with
+a virtual mouse.
+
+The other half is automatic. If your game exits while an overlay is up, the
+window padmode was going to return you to no longer exists, and asking the
+compositor to focus it succeeds while doing nothing at all — leaving you on the
+desktop holding a controller. With a frontend configured, padmode notices that
+focus did not land where it aimed and sends you home instead.
+
+One deliberate asymmetry: the **button** may start your frontend if it is not
+running, but the automatic fallback never will. A game crashing should not
+launch processes behind your back.
 
 Useful commands:
 
@@ -166,6 +203,25 @@ padmode config    # effective configuration after defaults and overrides
 padmode actions   # everything you can bind, and whether its tool is installed
 padmode windows   # the window backend, and whether each overlay can be found
 ```
+
+### Game libraries
+
+If you use Heroic and a frontend that reads Pegasus metadata, padmode can
+generate it:
+
+```bash
+padmode metadata heroic --dry-run   # see what it would write
+padmode metadata heroic             # write it, and fetch cover art
+```
+
+It reads Heroic's own library cache, downloads cover and background art once,
+and writes `~/Games/pegasus-heroic/metadata.pegasus.txt` (`--out` to change
+that). Re-running is cheap: art already on disk is never fetched twice. Add
+that directory in your frontend's settings — padmode writes the files but
+cannot register the directory for you.
+
+`install.sh` offers to keep it current automatically whenever you install or
+remove a game. This is a batch tool, entirely separate from the daemon.
 
 Logs go to the journal: `journalctl --user -u padmode -f`
 
@@ -238,6 +294,12 @@ command = ["discord"]      # optional: without it, only raises a running app
 [overlays.browser]
 class = "firefox"
 command = ["firefox"]
+
+[frontend]
+class = "pegasus"       # where a button bound to "frontend" takes you, and
+command = ["pegasus-fe"]   # where you land if the game exits while an overlay
+                           # is up. The command is used only by the button --
+                           # the automatic fallback never starts anything.
 ```
 
 Button names accept the obvious spellings: `RB` or `R1`, `GUIDE` or `MODE` or
@@ -285,8 +347,9 @@ and quietly ignoring half your bindings.
 |---|---|---|
 | ✅ v0.1 | Media, volume, mic while holding Guide | No |
 | ✅ v0.2 | Virtual mouse/keyboard, desktop mode | No |
-| ✅ **v0.3** | Window backends, in-game overlays, return-to-game | KDE + X11 |
-| v0.4 | Frontend integration, library metadata generators | KDE + X11 |
+| ✅ v0.3 | Window backends, in-game overlays, return-to-game | KDE + X11 |
+| ✅ **v0.4** | Frontend button and fallback, Heroic metadata generator | KDE + X11 |
+| v0.4.1 | Steam metadata generator | No |
 | v0.5 | Gamepad unlock (opt-in, off by default) | Screensaver D-Bus |
 
 v0.1 and v0.2 are deliberately useful on their own, on any desktop. Overlays

@@ -83,7 +83,8 @@ def cmd_windows(args: argparse.Namespace, config: Config) -> int:
         # to overlay, run this from a terminal on another screen or a delay.
         print(f"  class: {backend.window_class(active) or '(unknown)'}")
 
-    if not config.overlays:
+    frontend = config.frontend
+    if not config.overlays and frontend is None:
         print("\nNo overlays configured. To add one:\n")
         print("  [overlays.discord]")
         print('  class = "discord"')
@@ -92,8 +93,9 @@ def cmd_windows(args: argparse.Namespace, config: Config) -> int:
         print('  B = "overlay.discord"')
         return 0
 
-    print("\noverlays:")
     stuck = 0
+    if config.overlays:
+        print("\noverlays:")
     for name, overlay in sorted(config.overlays.items()):
         window = backend.find_window(overlay.window_class)
         if window is not None:
@@ -108,7 +110,43 @@ def cmd_windows(args: argparse.Namespace, config: Config) -> int:
             stuck += 1
             state = f"no window matching class {overlay.window_class!r}, and no command"
         print(f"  {name:12} {state}")
+
+    if frontend is not None:
+        window = backend.find_window(frontend.window_class)
+        print("\nfrontend:")
+        if window is not None:
+            print(f"  found {window}")
+        elif frontend.command:
+            print(f"  not running; the frontend button would start "
+                  f"{' '.join(frontend.command)}")
+            # Worth spelling out: it is the one asymmetry in this feature.
+            print("  the return-target fallback would find nothing, and never "
+                  "starts it")
+        else:
+            print(f"  no window matching class {frontend.window_class!r}, and "
+                  "no command to start one")
+    elif config.overlays:
+        print("\nNo frontend configured. If a game exits while an overlay is")
+        print("up, there is nowhere to return to. To add one:\n")
+        print("  [frontend]")
+        print('  class = "pegasus"')
     return 1 if stuck else 0
+
+
+def cmd_metadata(args: argparse.Namespace, config: Config) -> int:
+    """Generate frontend metadata from a game library.
+
+    The import is inside the function on purpose. The generators do network and
+    filesystem work that has no business near the input loop, and CLAUDE.md §2
+    keeps them out of the daemon entirely -- so nothing above this line may
+    import them, and a test asserts it.
+    """
+    if args.generator is None:
+        args.metadata_parser.print_help()
+        return 2
+    from .metadata import heroic
+
+    return heroic.main(args)
 
 
 def cmd_devices(args: argparse.Namespace, config: Config) -> int:
@@ -157,6 +195,11 @@ def cmd_actions(args: argparse.Namespace, config: Config) -> int:
     for name, spec in sorted(ACTIONS.items()):
         ok = "" if runner.available(spec.binary) else f"  [{spec.binary} NOT INSTALLED]"
         print(f"  {name:<{width}}  {spec.help}{ok}")
+    # Not actions, but the first place someone looks for "what can I bind?".
+    print("\nA binding can also be:")
+    print(f"  {'overlay.<name>':<{width}}  raise an app declared in [overlays]")
+    print(f"  {'frontend':<{width}}  raise the app declared in [frontend]")
+    print(f"  {'[\"cmd\", \"arg\"]':<{width}}  any command you like")
     return 0
 
 
@@ -201,6 +244,17 @@ def cmd_config(args: argparse.Namespace, config: Config) -> int:
             print(f"command = {overlay.command!r}")
     if not config.overlays:
         print("\n# no overlays configured -- see 'padmode windows'")
+
+    if config.frontend is not None:
+        print("\n[frontend]")
+        print(f'class = "{config.frontend.window_class}"')
+        if config.frontend.command:
+            print(f"command = {config.frontend.command!r}")
+            print("# used by a button bound to \"frontend\"; the return-target")
+            print("# fallback never starts it")
+    else:
+        print("\n# no frontend configured -- overlay mode has nowhere to fall")
+        print("# back to if the game exits while the overlay is up")
     return 0
 
 
@@ -227,8 +281,50 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("config", help="show effective configuration").set_defaults(
         func=cmd_config
     )
+    _add_metadata_parser(sub)
     parser.set_defaults(func=cmd_run)
     return parser
+
+
+def _add_metadata_parser(sub) -> None:
+    """``padmode metadata <generator>``: write frontend metadata for a library.
+
+    Every flag is declared here rather than by the generator itself. The parser
+    is built on every invocation, so asking the generator to describe its own
+    options would import it -- and its network and filesystem machinery -- into
+    ``padmode run`` (CLAUDE.md §2). What the flags *mean* still belongs to the
+    generator: it resolves them against the environment and its own defaults.
+    """
+    metadata = sub.add_parser(
+        "metadata",
+        help="generate frontend metadata from a game library",
+        description="Read a launcher's library and write metadata for a "
+                    "frontend. Not part of the daemon; run it whenever your "
+                    "library changes.",
+    )
+    generators = metadata.add_subparsers(dest="generator")
+    heroic = generators.add_parser(
+        "heroic", help="Heroic (Epic, GOG, Amazon) -> Pegasus",
+    )
+    heroic.add_argument(
+        "--heroic-dir", type=Path, metavar="PATH",
+        help="Heroic's config directory "
+             "(default: autodetect, or $HEROIC_CONFIG_DIR)",
+    )
+    heroic.add_argument(
+        "--out", type=Path, metavar="PATH",
+        help="where to write metadata and art "
+             "(default: $PEGASUS_HEROIC_OUT, else ~/Games/pegasus-heroic)",
+    )
+    heroic.add_argument(
+        "--collection", metavar="NAME",
+        help="collection name in the frontend (default: Heroic)",
+    )
+    heroic.add_argument(
+        "--dry-run", action="store_true",
+        help="print the metadata instead of writing anything or fetching art",
+    )
+    metadata.set_defaults(func=cmd_metadata, metadata_parser=metadata)
 
 
 def main(argv: list[str] | None = None) -> int:
