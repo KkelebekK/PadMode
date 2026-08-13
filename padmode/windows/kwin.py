@@ -57,6 +57,15 @@ class KwinBackend(WindowBackend):
     def activate_window(self, window_id: WindowId) -> None:
         self._run([self._tool, "windowactivate", window_id])
 
+    def minimize_window(self, window_id: WindowId) -> bool:
+        """Minimize, verified working on Plasma 6.7.
+
+        A minimized window is still returned by ``search``, so the next overlay
+        press raises this one rather than starting a second copy of the app.
+        That was the thing worth checking before making this the default.
+        """
+        return self._run([self._tool, "windowminimize", window_id]) is not None
+
     def window_class(self, window_id: WindowId) -> str | None:
         return first_line(
             self._run([self._tool, "getwindowclassname", window_id])

@@ -121,6 +121,17 @@ class WindowBackend:
         """
         return None
 
+    def minimize_window(self, window_id: WindowId) -> bool:
+        """Minimize a window. False if this backend cannot do it.
+
+        Optional, but the default overlay behaviour uses it: getting the
+        overlay off the screen is what stops focus-follows-mouse handing focus
+        straight back to it. A backend without it still works -- the cursor is
+        moved clear of the overlay instead, which is weaker but needs nothing
+        from the compositor beyond the required three.
+        """
+        return False
+
     # -- optional: diagnostics only ------------------------------------
     def window_class(self, window_id: WindowId) -> str | None:
         """Class of a window, or None if this backend cannot say.

@@ -342,6 +342,31 @@ def _stick_direction_ops(
     return ()
 
 
+#: Where in a window the cursor may be parked, as fractions of its size. The
+#: centre first, then points a sixth of the way in from each side. Corners are
+#: deliberately absent: on a fullscreen window they are *screen* corners, and
+#: landing on one triggers whatever hot corner the user has configured.
+LANDING_FRACTIONS = (
+    (0.5, 0.5),
+    (0.16, 0.5), (0.84, 0.5), (0.5, 0.16), (0.5, 0.84),
+    (0.16, 0.16), (0.84, 0.16), (0.16, 0.84), (0.84, 0.84),
+)
+
+
+def _landing_spots(home, origin: tuple[int, int]):
+    """Places to leave the cursor inside ``home``, best first.
+
+    Where it already is comes first: not moving the user's pointer is always
+    the best outcome, and every later candidate is a compromise.
+    """
+    yield origin
+    for fx, fy in LANDING_FRACTIONS:
+        yield (
+            home.x + round(home.width * fx),
+            home.y + round(home.height * fy),
+        )
+
+
 def stick_tick_ops(state: State, desktop, now: float) -> tuple[VirtualOp, ...]:
     """Re-evaluate bound stick axes on the tick, using the last known values.
 
@@ -484,6 +509,8 @@ class Daemon:
         self._state = State()
         #: Window to hand focus back to when overlay mode ends.
         self._return_to = None
+        #: The window the overlay raised, so the cursor can be kept off it.
+        self._overlay_window = None
         #: Where the cursor was before we parked it, so it can be put back.
         self._parked_from: tuple[int, int] | None = None
         #: ``(overlay, deadline, next poll)`` while waiting for a launched app.
@@ -679,9 +706,11 @@ class Daemon:
         self._state.mode = Mode.IDLE
         self._state.reset_inputs()
         # A return already in flight survives a refused entry: failing to open
-        # a second overlay is no reason to strand the user on the first.
+        # a second overlay is no reason to strand the user on the first, nor to
+        # forget which window that return still has to put away.
         if self._pending_return is None:
             self._return_to = None
+            self._overlay_window = None
         self._pending_launch = None
         self._reader.ungrab()
         return False
@@ -718,6 +747,7 @@ class Daemon:
         if self._windows is None:
             return
         log.info("overlay %s: activating %s", overlay.name, window_id)
+        self._overlay_window = window_id
         self._windows.activate_window(window_id)
         if self._config.windows.park_pointer:
             self._park(window_id)
@@ -744,13 +774,30 @@ class Daemon:
 
     def _finish_return(self) -> None:
         self._pending_return = None
+        overlay, self._overlay_window = self._overlay_window, None
+        going_back = self._windows is not None and self._return_to is not None
+
+        # Get the overlay off the screen first. Under focus-follows-mouse a
+        # visible overlay under the cursor takes focus straight back -- measured
+        # on a real game, 460ms after we handed focus over, with the cursor
+        # never moving. A minimized window cannot do that. It is also the only
+        # way to guarantee the game is unobscured, and KWin still finds a
+        # minimized window by class, so the next press raises this one rather
+        # than starting a second copy.
+        hidden = False
+        if going_back and overlay is not None and self._config.windows.minimize_on_return:
+            hidden = self._windows.minimize_window(overlay)
+            if not hidden:
+                log.debug("this backend cannot minimize; leaving %s on screen",
+                          overlay)
+
         # Put the cursor back *before* the old window takes focus: the motion
         # then lands on the overlay, which does not care, rather than on a game
         # that would read it as a camera turn.
         if self._parked_from is not None:
             origin, self._parked_from = self._parked_from, None
-            self._warp(*self._homecoming(origin))
-        if self._windows is not None and self._return_to is not None:
+            self._warp(*self._homecoming(origin, None if hidden else overlay))
+        if going_back:
             log.info("returning to %s", self._return_to)
             self._windows.activate_window(self._return_to)
         self._return_to = None
@@ -758,28 +805,47 @@ class Daemon:
             self._reader.set_tick(None)
 
     # -- cursor parking (gotcha §6.3) ----------------------------------
-    def _homecoming(self, origin: tuple[int, int]) -> tuple[int, int]:
+    def _homecoming(self, origin: tuple[int, int], covering) -> tuple[int, int]:
         """Where to leave the cursor on the way out. Usually where it started.
 
         Not always, though, and this is the case parking exists for. Under
-        focus-follows-mouse the cursor decides who has focus, so putting it back
-        somewhere that is *not* over the window we are about to activate hands
-        focus straight back to the overlay -- the pointer is still sitting on
-        it. It shows up as the overlay bouncing to the front the instant you
-        return, and it needs the overlay to be larger than what is underneath,
-        which is why it looks rare and random.
+        focus-follows-mouse the cursor decides who has focus, so leaving it
+        anywhere the overlay still covers hands focus straight back to the
+        overlay -- the pointer is sitting on it -- and it bounces to the front
+        the instant you return.
 
-        So when the cursor started outside the window we are returning to, it
-        goes to the middle of that window instead.
+        The test that matters is therefore *not* "is the origin inside the
+        window we are going back to". Measured on a real fullscreen game
+        (2560x1440) with a browser overlay inside it, the origin is inside the
+        game essentially always, and is under the browser as well. What the
+        cursor needs is a spot that is inside the window we are returning to
+        **and** outside the overlay.
+
+        If no such spot exists -- an overlay that covers the whole window --
+        the cursor stays where it started, because moving it would not help.
+
+        ``covering`` is the overlay to stay clear of, or None when it has been
+        minimized: an overlay that is off the screen cannot steal focus, and
+        moving the user's pointer to dodge a window they can no longer see
+        would be motion for nothing.
         """
         if self._windows is None or self._return_to is None:
             return origin
-        rect = self._windows.window_geometry(self._return_to)
-        if rect is None or rect.contains(*origin):
+        home = self._windows.window_geometry(self._return_to)
+        if home is None:
             return origin
-        log.debug("cursor started at %s, outside the window we are returning "
-                  "to; landing on that window instead", origin)
-        return rect.centre
+        covered = (
+            self._windows.window_geometry(covering)
+            if covering is not None
+            else None
+        )
+        for spot in _landing_spots(home, origin):
+            if home.contains(*spot) and not (covered and covered.contains(*spot)):
+                if spot != origin:
+                    log.debug("cursor origin %s is still under the overlay; "
+                              "landing on %s instead", origin, spot)
+                return spot
+        return origin
 
     def _park(self, window_id) -> None:
         rect = self._windows.window_geometry(window_id)

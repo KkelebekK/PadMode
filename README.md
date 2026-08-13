@@ -147,9 +147,10 @@ B = "overlay.chat"         # hold Guide, press B
 ```
 
 That is the whole feature. If the app is already running it is raised; if it
-isn't, padmode starts it and waits for its window. Leaving puts focus back on
-the window you came from — and hands the pad back *first*, so a button you are
-still holding cannot leak through into your game.
+isn't, padmode starts it and waits for its window. Leaving minimizes the
+overlay and puts focus back on the window you came from — and hands the pad
+back *first*, so a button you are still holding cannot leak through into your
+game. The app keeps running, so the next press raises it instantly.
 
 Don't know what to put in `class`? Focus the app and run `padmode windows`.
 
@@ -225,10 +226,13 @@ backend = "auto"       # auto | kwin | x11 | none. Autodetected from the session
 settle = 0.7           # pause between handing the pad back and refocusing the
                        # game, so a button you are still holding can't leak in
 launch_timeout = 10    # how long to wait for a launched app's window
-park_pointer = false   # move the cursor onto the overlay, and back onto your
-                       # game when you return. Worth enabling if you use
-                       # focus-follows-mouse: without it, a cursor left sitting
-                       # on the overlay hands focus straight back to it
+minimize_on_return = true  # minimize the overlay when you go back to the game.
+                       # Keeps the game unobscured, and stops the overlay
+                       # taking focus back under focus-follows-mouse. The app
+                       # keeps running either way
+park_pointer = false   # move the cursor onto the overlay, and onto the game
+                       # when you return. Only useful with minimize_on_return
+                       # off, where the overlay stays visible under the cursor
 
 [overlays.chat]
 class = "discord"          # regex, case-insensitive, matched on window class
@@ -266,19 +270,23 @@ and quietly ignoring half your bindings.
   repeat.
 - **One gamepad.** Multi-pad support isn't implemented; the first matching
   device wins.
-- **Exclusive-fullscreen games cannot be overlaid.** Nothing can draw over
-  them; that is what exclusive means. Use borderless windowed.
+- **Some games may refuse to be overlaid.** Fullscreen on its own is not the
+  problem — a fullscreen Steam game overlays fine on KDE Wayland, because the
+  compositor stops bypassing itself as soon as something must be drawn on top.
+  A game running under its own gamescope session is a different matter. Press
+  the button and look; it takes ten seconds to find out.
 - **Overlays need a window backend.** No `kdotool`/`xdotool`, or GNOME on
   Wayland, means the overlay buttons do nothing and say so once at startup.
   Nothing else is affected.
-- **Focus-follows-mouse can bounce you back to the overlay.** Returning to a
-  window smaller than the overlay leaves the cursor sitting on the overlay, and
-  under focus-follows-mouse that is enough to hand focus back to it. Set
-  `park_pointer = true` and padmode puts the cursor on the window it returns
-  you to.
+- **Apps that minimize to the system tray vanish instead of minimizing.** The
+  overlay is minimized when you return to your game, and a few apps are
+  configured to hide to the tray when minimized. padmode still finds and raises
+  them, so overlays keep working — but if you would rather nothing was
+  minimized, set `minimize_on_return = false`.
 - **`park_pointer` is unproven.** No compositor here can place the cursor, so
   padmode drives its own pointer and corrects until it arrives. It is off by
-  default and gives up rather than fighting; if it lands short, that is why.
+  default, only matters with `minimize_on_return = false`, and gives up rather
+  than fighting; if it lands short, that is why.
 
 ## Roadmap
 

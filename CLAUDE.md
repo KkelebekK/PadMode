@@ -9,9 +9,9 @@ screen with the pad.
 `WeHaveSteamMachineAtHome` (a joke); do not use "Steam Machine" or other Valve
 product names in the shipped tool, package, or docs.
 
-**Status: v0.3.1** (Guide-hold media/volume/mic; uinput virtual
+**Status: v0.3.2** (Guide-hold media/volume/mic; uinput virtual
 mouse/keyboard; desktop mode with bindable stick directions; window backends
-and overlay mode with return-to-game; 281 tests). This document is the
+and overlay mode with return-to-game; 292 tests). This document is the
 contract. If something here is wrong, fix this file in the same change as the
 code.
 
@@ -106,10 +106,11 @@ activate_window(window_id) -> None
 get_active_window() -> WindowId | None
 ```
 
-Three more are **optional**, default to returning `None`, and disable the
-feature built on them rather than the backend: `window_geometry` and
-`pointer_position` (for `park_pointer`), and `window_class` (for
-`padmode windows` and nothing else).
+Four more are **optional**, default to "cannot", and disable the feature built
+on them rather than the backend: `minimize_window` (used by the default return
+behaviour), `window_geometry` and `pointer_position` (for `park_pointer`), and
+`window_class` (for `padmode windows` and nothing else). A backend that
+implements only the required three still gives working overlays.
 
 Backends: `kwin` (via `kdotool`), `x11` (via `xdotool`; `wmctrl` turned out to
 be unnecessary), autodetected from the session. GNOME Wayland **cannot** be
@@ -238,22 +239,30 @@ Learned the hard way; re-learning them is expensive.
    configurable. *Live since v0.3:* `windows.settle`, deferred onto the tick
    rather than slept through, in `Daemon._schedule_return`. The ordering has a
    test of its own; do not "simplify" it into a sleep.
-2. **Exclusive-fullscreen games cannot be overlaid.** Document borderless
-   windowed as a requirement; don't try to work around it. Inherited from an
-   X11 setup, and **unmeasured on KWin Wayland**, where the compositor may
-   simply stop scanning out directly — `docs/window-backends.md` has the
-   `getWindowInfo` recipe for checking. Measure before hardening or softening
-   this.
-3. **Focus-follows-mouse can steal focus from an overlay** if the cursor drifts
-   off it — *and it steals it back on the way out*, if the cursor is left on
-   the overlay while a smaller window regains focus. Reported from real use.
-   *Live since v0.3:* `windows.park_pointer`, off by default, which since
-   v0.3.1 lands the cursor on the window being returned to rather than on its
-   literal starting point. Note that **no compositor here can warp the cursor**
-   — KWin's script API has no placement call and `xdotool mousemove` does
-   nothing on Wayland — so parking drives our own relative pointer in a
-   measure-and-correct loop. That loop has not yet been checked against real
-   pointer acceleration.
+2. ~~**Exclusive-fullscreen games cannot be overlaid.**~~ **Measured false on
+   KWin Wayland.** A Steam game reporting `fullscreen: true` at 2560x1440 was
+   overlaid with a browser and driven by the pad, then returned to. The claim
+   came from the X11 setup this replaces, where a game could mode-set and grab
+   the display outright; KWin drops out of direct scanout when something has to
+   be drawn on top. Do not tell users borderless windowed is a requirement.
+   Individual games may still resist (gamescope sessions, anything bypassing
+   the compositor), so treat it as per-game rather than a rule — the check is
+   in `docs/window-backends.md`.
+3. **Focus-follows-mouse steals focus back from the window you return to**, if
+   the overlay is still on screen under the cursor. Traced on a real game: the
+   game got focus, and 460ms later the overlay took it back with the cursor
+   never moving. *Since v0.3.2 the fix is `windows.minimize_on_return`, on by
+   default* — an overlay that is off the screen cannot take focus, and KWin
+   still finds a minimized window by class, so the next press raises it rather
+   than launching a second copy (verified).
+
+   `windows.park_pointer` remains, off by default, for anyone who turns
+   minimizing off; it then lands the cursor inside the returned-to window and
+   clear of the overlay. Two failed versions of that rule are recorded in
+   `docs/window-backends.md` — do not re-derive it. And note that **no
+   compositor here can warp the cursor**, so parking drives our own relative
+   pointer in a measure-and-correct loop that has still never been checked
+   against real pointer acceleration.
 4. **KWin "Keep above" silently breaks Alt+Tab.** Use focus protection instead.
    Relevant to the printed manual instructions, not to our code.
 5. **Gamepads re-enumerate.** The read loop must survive the device vanishing

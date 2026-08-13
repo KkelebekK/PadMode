@@ -65,6 +65,9 @@ class X11Backend(WindowBackend):
     def activate_window(self, window_id: WindowId) -> None:
         self._run([self._tool, "windowactivate", window_id])
 
+    def minimize_window(self, window_id: WindowId) -> bool:
+        return self._run([self._tool, "windowminimize", window_id]) is not None
+
     def window_class(self, window_id: WindowId) -> str | None:
         # xdotool prints the literal "(null)" and still exits 0 when a window
         # has no WM_CLASS, which is not a class name anybody wants echoed back.

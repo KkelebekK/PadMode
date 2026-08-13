@@ -141,10 +141,11 @@ Leaving (the same exit button as desktop mode):
 1. Release everything held on the virtual devices.
 2. **Release the grab.**
 3. Wait `settle` (default 0.7 s).
-4. Put the cursor back, if it was parked.
-5. Re-activate the remembered window.
+4. Minimize the overlay, unless `minimize_on_return = false`.
+5. Put the cursor back, if it was parked.
+6. Re-activate the remembered window.
 
-Step 2 before step 5 is gotcha §6.1, and it is not optional: a still-held
+Step 2 before step 6 is gotcha §6.1, and it is not optional: a still-held
 return button leaking a raw gamepad event into the newly focused window is what
 used to crash the frontend. The wait is *deferred onto the tick* rather than
 slept through, so the read loop stays alive and SIGTERM still gets the pad
@@ -166,10 +167,37 @@ Things that follow from this design and are easy to get wrong later:
 Cannot be overlaid, per gotcha §6.2. Borderless windowed is a requirement, not
 a suggestion — do not try to work around it.
 
+## Minimizing on return, and why it is the default
+
+Traced on a real fullscreen game with `watch_focus.py`:
+
+```
+t=+ 13.81  active=steam_app_3156330  cursor=(3472,722)  over=steam_app_3156330
+t=+ 14.27  active=zen                cursor=(3472,722)  over=zen
+```
+
+The return worked — the game had focus. Then 460 ms later the compositor gave
+it back to the browser, with the cursor never moving a pixel. That is
+focus-follows-mouse acting on a pointer that is still over the overlay, and no
+amount of care on our side of the activation call can prevent it while the
+overlay is visible underneath the cursor.
+
+So the overlay is minimized on the way out. It cannot take focus from off the
+screen, the game is guaranteed unobscured, and — checked before committing to
+it — **KWin still returns a minimized window from `search --class`**, so the
+next press raises that window instead of launching a second copy of the app.
+`windowactivate` restores and focuses it in one call.
+
+The caveat to keep in the README: an application configured to *minimize to the
+system tray* will disappear from the taskbar rather than minimize normally.
+padmode can still find and raise it, so overlays keep working, but users who
+dislike it can set `minimize_on_return = false`.
+
 ## Parking the cursor (`park_pointer`)
 
-Off by default. It exists for focus-follows-mouse setups, where the cursor
-sitting over the game can take focus back off the overlay (gotcha §6.3).
+Off by default, and largely superseded by minimizing — it matters when
+`minimize_on_return = false`, where the overlay stays visible and the cursor
+has to be kept off it (gotcha §6.3).
 
 The awkward part: **nothing here can warp the cursor.** KWin's scripting API
 exposes no cursor placement, `xdotool mousemove` does not move the real cursor
@@ -203,12 +231,23 @@ The cursor is restored **before** focus returns to the game, not after: a
 relative motion delivered to a focused game reads as a camera turn.
 
 **Where it is restored to is not always where it started.** Under
-focus-follows-mouse the cursor decides who has focus, so putting it back
-somewhere that is not over the window we just activated hands focus straight
-back to the overlay — the pointer is still sitting on it. Reported from real
-use: it needs the overlay to be larger than what is underneath, so it looks
-rare and random. `Daemon._homecoming` therefore lands on the middle of the
-window being returned to whenever the original position is outside it.
+focus-follows-mouse the cursor decides who has focus, so leaving it anywhere
+the overlay still covers hands focus straight back to the overlay — the
+pointer is sitting on it — and it bounces to the front the instant you return.
+
+The test is *not* "is the origin inside the window we are going back to". That
+version shipped in v0.3.1 and was measured useless within the hour: a
+fullscreen game at 1536,0 2560x1440 with a browser overlay at 1966,293
+1626x954 has the browser **wholly inside** the game, so the origin is inside
+the game essentially always and under the browser at the same time. What the
+cursor needs is a spot inside the window being returned to **and** outside the
+overlay. `Daemon._homecoming` tries the origin first, then the centre, then
+points a sixth of the way in from each side.
+
+Corners are deliberately not candidates: on a fullscreen window they are
+*screen* corners, and landing on one fires whatever hot corner the user has
+configured. If no spot is clear — an overlay covering the whole window — the
+cursor stays where it started, because moving it would not help.
 
 ## Exclusive fullscreen, and how to tell
 
@@ -228,11 +267,17 @@ Wayland, borderless-fullscreen and exclusive-fullscreen both report
 the game's buffer straight to the display. The definitive test is to press the
 overlay button and look.
 
-Gotcha §6.2 is inherited from the X11-era setup this replaces, where a game
-could mode-set and grab the display outright. Whether it still bites on KWin
-Wayland is **unmeasured** — the compositor may simply drop out of direct
-scanout when something has to be drawn on top. Measure it on a real game before
-either strengthening or softening the claim.
+**And the answer, measured, is that fullscreen is not a blocker here.** A Steam
+game (`resourceClass: steam_app_3156330`, `fullscreen: true`, 2560x1440) was
+overlaid with a browser, driven by the pad, and returned to. KWin evidently
+stops scanning out directly the moment another surface must be composited on
+top. Gotcha §6.2 came from the X11-era setup this replaces, where a game could
+mode-set and grab the display; it has been corrected rather than repeated.
+
+That is one game, not a proof about all of them. A title running under its own
+gamescope session, or one that keeps the compositor out of the loop some other
+way, may still refuse. Treat it as per-game, and use the recipe above plus the
+overlay button to find out in ten seconds.
 
 ---
 
@@ -267,8 +312,8 @@ systemctl --user stop padmode.service; pkill -f 'python -m padmode'
       return. The game keeps running and receives no stray input.
 - [ ] **Hold the exit button down** for a second or two while returning. The
       game must not receive a gamepad event from it (gotcha §6.1).
-- [ ] **Exclusive fullscreen** — confirm the overlay does not appear, as
-      documented. Do not treat this as a bug.
+- [ ] **A fullscreen game.** Confirmed working once; check it again after any
+      change to the overlay path, since it is the case the feature exists for.
 - [ ] **Second monitor.** Overlay an app that lives on another screen.
 - [ ] **Kill the daemon mid-settle** (exit the overlay, then Ctrl-C within
       0.7 s): focus still returns.
