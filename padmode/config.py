@@ -144,14 +144,6 @@ class WindowsConfig:
     #: How long to wait for a launched app's window to appear before giving up.
     #: Cold-starting an Electron app takes seconds, so this is generous.
     launch_timeout: float = 10.0
-    #: Minimize the overlay when returning to the window you came from. On by
-    #: default, because a visible overlay under the cursor takes focus straight
-    #: back under focus-follows-mouse -- measured on a real game, 460ms after
-    #: we handed focus over. It also guarantees the game is unobscured, and a
-    #: minimized window is still found by class, so the next press raises the
-    #: app rather than starting a second copy. Turn it off if you would rather
-    #: the overlay stayed on screen.
-    minimize_on_return: bool = True
     #: Move the cursor onto the overlay window (gotcha §6.3). Off by default:
     #: it only matters under focus-follows-mouse, which is not the default on
     #: any desktop we support, and it is the one thing here that moves the
@@ -267,12 +259,8 @@ def parse(data: dict[str, Any]) -> Config:
 
 def _parse_windows(table: dict[str, Any]) -> WindowsConfig:
     windows = WindowsConfig()
-    _reject_unknown(
-        table,
-        {"backend", "settle", "launch_timeout", "park_pointer",
-         "minimize_on_return"},
-        "windows",
-    )
+    _reject_unknown(table, {"backend", "settle", "launch_timeout", "park_pointer"},
+                    "windows")
 
     if "backend" in table:
         backend = table["backend"]
@@ -282,12 +270,10 @@ def _parse_windows(table: dict[str, Any]) -> WindowsConfig:
             )
         windows = replace(windows, backend=backend)
 
-    for key in ("park_pointer", "minimize_on_return"):
-        if key not in table:
-            continue
-        if not isinstance(table[key], bool):
-            raise ConfigError(f"windows.{key} must be true or false")
-        windows = replace(windows, **{key: table[key]})
+    if "park_pointer" in table:
+        if not isinstance(table["park_pointer"], bool):
+            raise ConfigError("windows.park_pointer must be true or false")
+        windows = replace(windows, park_pointer=table["park_pointer"])
 
     for key, lo, hi in (("settle", 0.0, 5.0), ("launch_timeout", 0.0, 120.0)):
         if key not in table:

@@ -226,13 +226,10 @@ backend = "auto"       # auto | kwin | x11 | none. Autodetected from the session
 settle = 0.7           # pause between handing the pad back and refocusing the
                        # game, so a button you are still holding can't leak in
 launch_timeout = 10    # how long to wait for a launched app's window
-minimize_on_return = true  # minimize the overlay when you go back to the game.
-                       # Keeps the game unobscured, and stops the overlay
-                       # taking focus back under focus-follows-mouse. The app
-                       # keeps running either way
-park_pointer = false   # move the cursor onto the overlay, and onto the game
-                       # when you return. Only useful with minimize_on_return
-                       # off, where the overlay stays visible under the cursor
+park_pointer = false   # move the cursor onto the overlay when it opens, and
+                       # back where it was when you return. Worth enabling
+                       # under focus-follows-mouse, where a cursor left over
+                       # your game can pull focus off the overlay
 
 [overlays.chat]
 class = "discord"          # regex, case-insensitive, matched on window class
@@ -280,8 +277,7 @@ and quietly ignoring half your bindings.
   Nothing else is affected.
 - **`park_pointer` is unproven.** No compositor here can place the cursor, so
   padmode drives its own pointer and corrects until it arrives. It is off by
-  default, only matters with `minimize_on_return = false`, and gives up rather
-  than fighting; if it lands short, that is why.
+  default and gives up rather than fighting; if it lands short, that is why.
 
 ## Roadmap
 

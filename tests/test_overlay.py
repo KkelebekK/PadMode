@@ -617,7 +617,10 @@ class TestMinimizingOnReturn(DaemonFixture):
         self.clock.sleep(self.config.windows.settle)
         self.daemon._tick()
 
-    def test_the_overlay_is_minimized_by_default(self):
+    def test_the_overlay_is_always_minimized(self):
+        # Not a default, not a setting: the only behaviour. A visible overlay
+        # under the cursor takes focus back, and there is no configuration that
+        # makes that a good outcome.
         self.build(windows={"discord": CHAT})
         self.return_from_overlay()
         self.assertEqual(self.backend.minimized, [CHAT])
@@ -628,13 +631,6 @@ class TestMinimizingOnReturn(DaemonFixture):
         self.build(windows={"discord": CHAT})
         self.return_from_overlay()
         self.assertLess(self.index_of("minimize"), self.index_of("activate"))
-
-    def test_it_can_be_switched_off(self):
-        config = overlay_config(windows={"minimize_on_return": False})
-        self.build(config, windows={"discord": CHAT})
-        self.return_from_overlay()
-        self.assertEqual(self.backend.minimized, [])
-        self.assertIn(("activate", GAME), self.log)
 
     def test_nothing_is_minimized_when_there_is_nowhere_to_go_back_to(self):
         # Otherwise leaving would hide the app and show bare desktop.
@@ -649,9 +645,10 @@ class TestMinimizingOnReturn(DaemonFixture):
         self.assertEqual(self.backend.minimized, [])
         self.assertIn(("activate", GAME), self.log)
 
-    def test_a_minimized_overlay_needs_no_cursor_dodging(self):
-        # It is off the screen; moving the pointer to avoid a window nobody
-        # can see would be motion for nothing.
+    def test_a_parked_cursor_goes_back_to_where_it_started(self):
+        # With the overlay minimized there is nothing left to dodge, so the
+        # cursor simply returns -- even from a spot the overlay used to cover.
+        # Real geometry: a fullscreen game with the browser wholly inside it.
         game, browser = Rect(1536, 0, 2560, 1440), Rect(1966, 293, 1626, 954)
         self.build(overlay_config(windows={"park_pointer": True}),
                    windows={"discord": CHAT},
@@ -659,16 +656,6 @@ class TestMinimizingOnReturn(DaemonFixture):
                    cursor=(2600, 700))
         self.return_from_overlay()
         self.assertEqual(self.backend.cursor, (2600, 700))
-
-    def test_an_overlay_left_on_screen_still_gets_dodged(self):
-        game, browser = Rect(1536, 0, 2560, 1440), Rect(1966, 293, 1626, 954)
-        self.build(overlay_config(windows={"park_pointer": True,
-                                           "minimize_on_return": False}),
-                   windows={"discord": CHAT},
-                   geometries={CHAT: browser, GAME: game},
-                   cursor=(2600, 700))
-        self.return_from_overlay()
-        self.assertFalse(browser.contains(*self.backend.cursor))
 
 
 class TestDesktopModeIsUnaffected(DaemonFixture):
@@ -693,13 +680,7 @@ class TestParkingTheCursor(DaemonFixture):
     """The closed loop that stands in for a warp nobody exposes."""
 
     def parking_config(self, **windows):
-        # Minimizing is switched off throughout this class on purpose: the
-        # cursor only has to dodge an overlay that is still on the screen, and
-        # with the default minimize it never is. TestMinimizingOnReturn covers
-        # the interaction between the two.
-        return overlay_config(
-            windows={"park_pointer": True, "minimize_on_return": False, **windows}
-        )
+        return overlay_config(windows={"park_pointer": True, **windows})
 
     def test_off_by_default(self):
         self.build(windows={"discord": CHAT},
@@ -755,98 +736,6 @@ class TestParkingTheCursor(DaemonFixture):
         self.assertGreater(len(self.virtual.moves), moves_on_entry)
         self.assertEqual(self.backend.cursor, (40, 60))
         self.assertEqual(cursor_when_focus_returned, [(40, 60)])
-
-    def test_a_fullscreen_game_with_the_overlay_inside_it(self):
-        """The real case, with real numbers.
-
-        Measured from a Steam game on the maintainer's machine: the game is
-        fullscreen at 1536,0 2560x1440 and the browser overlay sits wholly
-        inside it at 1966,293 1626x954. "Is the origin inside the window we are
-        returning to" is true everywhere here, so the first version of this
-        logic never moved the cursor -- and the cursor stayed under the
-        browser, which took focus straight back.
-        """
-        game, browser = Rect(1536, 0, 2560, 1440), Rect(1966, 293, 1626, 954)
-        self.build(self.parking_config(), windows={"discord": CHAT},
-                   geometries={CHAT: browser, GAME: game},
-                   cursor=(2600, 700))  # inside both
-        self.enter_overlay()
-        self.leave_overlay()
-        self.clock.sleep(self.config.windows.settle)
-        self.daemon._tick()
-
-        landed = self.backend.cursor
-        self.assertTrue(game.contains(*landed), f"{landed} is off the game")
-        self.assertFalse(browser.contains(*landed), f"{landed} is under the browser")
-
-    def test_the_cursor_is_not_moved_when_the_origin_is_already_clear(self):
-        # Moving somebody's pointer is a cost; only pay it when it buys
-        # something. An origin over the game and clear of the overlay is fine.
-        game, browser = Rect(1536, 0, 2560, 1440), Rect(1966, 293, 1626, 954)
-        self.build(self.parking_config(), windows={"discord": CHAT},
-                   geometries={CHAT: browser, GAME: game},
-                   cursor=(1700, 100))  # inside the game, outside the browser
-        self.enter_overlay()
-        self.leave_overlay()
-        self.clock.sleep(self.config.windows.settle)
-        self.daemon._tick()
-        self.assertEqual(self.backend.cursor, (1700, 100))
-
-    def test_an_overlay_covering_everything_leaves_the_cursor_alone(self):
-        # No spot would help, so do not move the pointer for nothing.
-        covering = Rect(0, 0, 4000, 2000)
-        self.build(self.parking_config(), windows={"discord": CHAT},
-                   geometries={CHAT: covering, GAME: Rect(1536, 0, 2560, 1440)},
-                   cursor=(2600, 700))
-        self.enter_overlay()
-        self.leave_overlay()
-        self.clock.sleep(self.config.windows.settle)
-        self.daemon._tick()
-        self.assertEqual(self.backend.cursor, (2600, 700))
-
-    def test_landing_spots_avoid_the_corners(self):
-        # On a fullscreen window the corners are screen corners, and landing
-        # on one fires whatever hot corner the user has configured.
-        home = Rect(0, 0, 1000, 1000)
-        spots = list(daemon_module._landing_spots(home, (500, 500)))
-        for x, y in spots:
-            self.assertTrue(100 <= x <= 900 and 100 <= y <= 900, (x, y))
-
-    def test_an_origin_outside_the_returned_to_window_lands_on_it_instead(self):
-        # Focus-follows-mouse: putting the cursor back somewhere that is not
-        # over the window we just activated hands focus straight back to the
-        # overlay, because the pointer is still sitting on it.
-        self.build(self.parking_config(), windows={"discord": CHAT},
-                   geometries={CHAT: Rect(1000, 0, 400, 300),
-                               GAME: Rect(0, 0, 500, 500)},
-                   cursor=(900, 400))  # outside the game, under the overlay
-        self.enter_overlay()
-        self.leave_overlay()
-        self.clock.sleep(self.config.windows.settle)
-        self.daemon._tick()
-        self.assertEqual(self.backend.cursor, (250, 250))  # centre of GAME
-
-    def test_an_origin_inside_the_returned_to_window_is_left_alone(self):
-        # The cursor belongs where the user left it whenever that is safe.
-        self.build(self.parking_config(), windows={"discord": CHAT},
-                   geometries={CHAT: Rect(1000, 0, 400, 300),
-                               GAME: Rect(0, 0, 500, 500)},
-                   cursor=(100, 120))
-        self.enter_overlay()
-        self.leave_overlay()
-        self.clock.sleep(self.config.windows.settle)
-        self.daemon._tick()
-        self.assertEqual(self.backend.cursor, (100, 120))
-
-    def test_an_unmeasurable_return_window_falls_back_to_the_origin(self):
-        self.build(self.parking_config(), windows={"discord": CHAT},
-                   geometries={CHAT: Rect(1000, 0, 400, 300)},  # none for GAME
-                   cursor=(900, 400))
-        self.enter_overlay()
-        self.leave_overlay()
-        self.clock.sleep(self.config.windows.settle)
-        self.daemon._tick()
-        self.assertEqual(self.backend.cursor, (900, 400))
 
     def test_re_entering_keeps_the_original_cursor_origin(self):
         # The second park must not record the middle of the first overlay as

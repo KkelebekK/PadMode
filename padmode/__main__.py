@@ -193,7 +193,6 @@ def cmd_config(args: argparse.Namespace, config: Config) -> int:
     print(f'backend = "{windows.backend}"')
     print(f"settle = {windows.settle:g}")
     print(f"launch_timeout = {windows.launch_timeout:g}")
-    print(f"minimize_on_return = {str(windows.minimize_on_return).lower()}")
     print(f"park_pointer = {str(windows.park_pointer).lower()}")
     for name, overlay in sorted(config.overlays.items()):
         print(f"\n[overlays.{name}]")

@@ -141,7 +141,7 @@ Leaving (the same exit button as desktop mode):
 1. Release everything held on the virtual devices.
 2. **Release the grab.**
 3. Wait `settle` (default 0.7 s).
-4. Minimize the overlay, unless `minimize_on_return = false`.
+4. Minimize the overlay.
 5. Put the cursor back, if it was parked.
 6. Re-activate the remembered window.
 
@@ -188,8 +188,12 @@ it — **KWin still returns a minimized window from `search --class`**, so the
 next press raises that window instead of launching a second copy of the app.
 `windowactivate` restores and focuses it in one call.
 
-`minimize_on_return = false` restores the old behaviour for anyone who would
-rather the overlay stayed on screen.
+**There is no switch for this.** It shipped as `minimize_on_return = true` for
+exactly one version before being made unconditional: no configuration makes
+"the overlay steals focus back from your game" a good outcome, and each option
+is another combination the code has to keep working. A backend that cannot
+minimize simply leaves the overlay up — the optional-operation contract doing
+its job.
 
 An earlier draft of this section warned that apps set to *minimize to the system
 tray* would vanish instead. That was written from plausibility, not
@@ -199,9 +203,10 @@ and write down what actually happened; do not restore a guess.
 
 ## Parking the cursor (`park_pointer`)
 
-Off by default, and largely superseded by minimizing — it matters when
-`minimize_on_return = false`, where the overlay stays visible and the cursor
-has to be kept off it (gotcha §6.3).
+Off by default. It does one symmetrical thing: put the cursor on the overlay
+when it opens, and back where it started when you leave. The first half is what
+still earns its keep under focus-follows-mouse — a cursor left sitting over the
+game can pull focus off the overlay you just opened (gotcha §6.3).
 
 The awkward part: **nothing here can warp the cursor.** KWin's scripting API
 exposes no cursor placement, `xdotool mousemove` does not move the real cursor
@@ -234,24 +239,25 @@ anything about the curve.
 The cursor is restored **before** focus returns to the game, not after: a
 relative motion delivered to a focused game reads as a camera turn.
 
-**Where it is restored to is not always where it started.** Under
-focus-follows-mouse the cursor decides who has focus, so leaving it anywhere
-the overlay still covers hands focus straight back to the overlay — the
-pointer is sitting on it — and it bounces to the front the instant you return.
+### Two return rules that did not survive
 
-The test is *not* "is the origin inside the window we are going back to". That
-version shipped in v0.3.1 and was measured useless within the hour: a
-fullscreen game at 1536,0 2560x1440 with a browser overlay at 1966,293
-1626x954 has the browser **wholly inside** the game, so the origin is inside
-the game essentially always and under the browser at the same time. What the
-cursor needs is a spot inside the window being returned to **and** outside the
-overlay. `Daemon._homecoming` tries the origin first, then the centre, then
-points a sixth of the way in from each side.
+Both were attempts to stop the overlay taking focus back by choosing where the
+cursor lands. Both were killed by measurement, and neither is worth deriving a
+third time — minimizing the overlay solved it instead, and the cursor now
+simply goes back where it started.
 
-Corners are deliberately not candidates: on a fullscreen window they are
-*screen* corners, and landing on one fires whatever hot corner the user has
-configured. If no spot is clear — an overlay covering the whole window — the
-cursor stays where it started, because moving it would not help.
+1. **"Restore the cursor faithfully."** Wrong under focus-follows-mouse: the
+   place it started may be a place the overlay now covers, so restoring it
+   hands focus straight back.
+2. **"Redirect when the origin is outside the window we are returning to."**
+   Shipped in v0.3.1, useless within the hour. A fullscreen game at 1536,0
+   2560x1440 with a browser overlay at 1966,293 1626x954 contains that overlay
+   *wholly*, so the origin is inside the game essentially always and the rule
+   never fired.
+
+A third version — land on a spot inside the game and clear of the overlay —
+worked in tests, and was deleted unused when minimizing became unconditional.
+It is in the history if it is ever needed for a backend that cannot minimize.
 
 ## Exclusive fullscreen, and how to tell
 

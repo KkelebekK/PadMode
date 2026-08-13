@@ -9,9 +9,9 @@ screen with the pad.
 `WeHaveSteamMachineAtHome` (a joke); do not use "Steam Machine" or other Valve
 product names in the shipped tool, package, or docs.
 
-**Status: v0.3.2** (Guide-hold media/volume/mic; uinput virtual
+**Status: v0.3.3** (Guide-hold media/volume/mic; uinput virtual
 mouse/keyboard; desktop mode with bindable stick directions; window backends
-and overlay mode with return-to-game; 292 tests). This document is the
+and overlay mode with return-to-game; 283 tests). This document is the
 contract. If something here is wrong, fix this file in the same change as the
 code.
 
@@ -107,8 +107,8 @@ get_active_window() -> WindowId | None
 ```
 
 Four more are **optional**, default to "cannot", and disable the feature built
-on them rather than the backend: `minimize_window` (used by the default return
-behaviour), `window_geometry` and `pointer_position` (for `park_pointer`), and
+on them rather than the backend: `minimize_window` (used on every return),
+`window_geometry` and `pointer_position` (for `park_pointer`), and
 `window_class` (for `padmode windows` and nothing else). A backend that
 implements only the required three still gives working overlays.
 
@@ -257,15 +257,18 @@ Learned the hard way; re-learning them is expensive.
 3. **Focus-follows-mouse steals focus back from the window you return to**, if
    the overlay is still on screen under the cursor. Traced on a real game: the
    game got focus, and 460ms later the overlay took it back with the cursor
-   never moving. *Since v0.3.2 the fix is `windows.minimize_on_return`, on by
-   default* — an overlay that is off the screen cannot take focus, and KWin
-   still finds a minimized window by class, so the next press raises it rather
-   than launching a second copy (verified).
+   never moving. *Since v0.3.2 the overlay is always minimized on the way out*
+   — an overlay that is off the screen cannot take focus, and KWin still finds
+   a minimized window by class, so the next press raises it rather than
+   launching a second copy (verified). **Not configurable, deliberately**: no
+   setting makes "the overlay steals focus back" a good outcome, and every
+   switch is another combination that has to work.
 
-   `windows.park_pointer` remains, off by default, for anyone who turns
-   minimizing off; it then lands the cursor inside the returned-to window and
-   clear of the overlay. Two failed versions of that rule are recorded in
-   `docs/window-backends.md` — do not re-derive it. And note that **no
+   `windows.park_pointer` remains, off by default, and now does only the
+   symmetrical thing: cursor onto the overlay when it opens, back where it
+   started when you leave. Two attempts at a cleverer return rule were both
+   killed by measurement within hours and are recorded in
+   `docs/window-backends.md` — do not re-derive them. Note also that **no
    compositor here can warp the cursor**, so parking drives our own relative
    pointer in a measure-and-correct loop that has still never been checked
    against real pointer acceleration.
