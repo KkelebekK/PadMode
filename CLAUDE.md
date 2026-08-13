@@ -9,9 +9,9 @@ screen with the pad.
 `WeHaveSteamMachineAtHome` (a joke); do not use "Steam Machine" or other Valve
 product names in the shipped tool, package, or docs.
 
-**Status: v0.3 implemented** (Guide-hold media/volume/mic; uinput virtual
+**Status: v0.3.1** (Guide-hold media/volume/mic; uinput virtual
 mouse/keyboard; desktop mode with bindable stick directions; window backends
-and overlay mode with return-to-game; 277 tests). This document is the
+and overlay mode with return-to-game; 281 tests). This document is the
 contract. If something here is wrong, fix this file in the same change as the
 code.
 
@@ -239,13 +239,21 @@ Learned the hard way; re-learning them is expensive.
    rather than slept through, in `Daemon._schedule_return`. The ordering has a
    test of its own; do not "simplify" it into a sleep.
 2. **Exclusive-fullscreen games cannot be overlaid.** Document borderless
-   windowed as a requirement; don't try to work around it.
+   windowed as a requirement; don't try to work around it. Inherited from an
+   X11 setup, and **unmeasured on KWin Wayland**, where the compositor may
+   simply stop scanning out directly — `docs/window-backends.md` has the
+   `getWindowInfo` recipe for checking. Measure before hardening or softening
+   this.
 3. **Focus-follows-mouse can steal focus from an overlay** if the cursor drifts
-   off it. *Live since v0.3:* `windows.park_pointer`, off by default. Note that
-   **no compositor here can warp the cursor** — KWin's script API has no
-   placement call and `xdotool mousemove` does nothing on Wayland — so parking
-   drives our own relative pointer in a measure-and-correct loop. That loop has
-   not yet been checked against real pointer acceleration.
+   off it — *and it steals it back on the way out*, if the cursor is left on
+   the overlay while a smaller window regains focus. Reported from real use.
+   *Live since v0.3:* `windows.park_pointer`, off by default, which since
+   v0.3.1 lands the cursor on the window being returned to rather than on its
+   literal starting point. Note that **no compositor here can warp the cursor**
+   — KWin's script API has no placement call and `xdotool mousemove` does
+   nothing on Wayland — so parking drives our own relative pointer in a
+   measure-and-correct loop. That loop has not yet been checked against real
+   pointer acceleration.
 4. **KWin "Keep above" silently breaks Alt+Tab.** Use focus protection instead.
    Relevant to the printed manual instructions, not to our code.
 5. **Gamepads re-enumerate.** The read loop must survive the device vanishing

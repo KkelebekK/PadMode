@@ -118,12 +118,15 @@ class FakeBackend(WindowBackend):
         active: str | None = GAME,
         windows: dict[str, str] | None = None,
         geometry: Rect | None = None,
+        geometries: dict[str, Rect] | None = None,
         cursor: tuple[int, int] = (0, 0),
     ) -> None:
         self.log = log
         self.active = active
         self.windows = dict(windows or {})
         self.geometry = geometry
+        #: Per-window override, for tests that care which window is measured.
+        self.geometries = dict(geometries or {})
         self.cursor = cursor
         #: Set False to model a backend that implements only the required ops.
         self.can_report = True
@@ -140,7 +143,9 @@ class FakeBackend(WindowBackend):
         return self.active
 
     def window_geometry(self, window_id: str) -> Rect | None:
-        return self.geometry if self.can_report else None
+        if not self.can_report:
+            return None
+        return self.geometries.get(window_id, self.geometry)
 
     def pointer_position(self) -> tuple[int, int] | None:
         return self.cursor if self.can_report else None
@@ -559,6 +564,20 @@ class TestReturningFromAnOverlay(DaemonFixture):
         self.leave_overlay()
         self.assertFalse(self.reader.grabbed)
 
+    def test_re_entering_still_returns_to_the_window_we_started_from(self):
+        # Re-opening within the settle window must not make the overlay its
+        # own return target: focus has not gone back yet, so "what is active
+        # now" is the overlay, and exiting would strand the user on it.
+        self.build(windows={"discord": CHAT}, active=GAME)
+        self.enter_overlay()
+        self.leave_overlay()
+        self.enter_overlay()
+        self.assertEqual(self.daemon._return_to, GAME)
+        self.leave_overlay()
+        self.clock.sleep(self.config.windows.settle)
+        self.daemon._tick()
+        self.assertIn(("activate", GAME), self.log)
+
     def test_re_entering_cancels_a_return_that_is_still_pending(self):
         # Otherwise the old return fires mid-overlay and yanks focus away.
         self.build(windows={"discord": CHAT})
@@ -640,7 +659,9 @@ class TestParkingTheCursor(DaemonFixture):
         # Restoring after the game has focus would feed it a relative motion,
         # which a game reads as a camera turn.
         self.build(self.parking_config(), windows={"discord": CHAT},
-                   geometry=Rect(1000, 0, 400, 300), cursor=(40, 60))
+                   geometries={CHAT: Rect(1000, 0, 400, 300),
+                               GAME: Rect(0, 0, 500, 500)},
+                   cursor=(40, 60))
         self.enter_overlay()
         moves_on_entry = len(self.virtual.moves)
         self.leave_overlay()
@@ -656,11 +677,49 @@ class TestParkingTheCursor(DaemonFixture):
         self.assertEqual(self.backend.cursor, (40, 60))
         self.assertEqual(cursor_when_focus_returned, [(40, 60)])
 
+    def test_an_origin_outside_the_returned_to_window_lands_on_it_instead(self):
+        # Focus-follows-mouse: putting the cursor back somewhere that is not
+        # over the window we just activated hands focus straight back to the
+        # overlay, because the pointer is still sitting on it.
+        self.build(self.parking_config(), windows={"discord": CHAT},
+                   geometries={CHAT: Rect(1000, 0, 400, 300),
+                               GAME: Rect(0, 0, 500, 500)},
+                   cursor=(900, 400))  # outside the game, under the overlay
+        self.enter_overlay()
+        self.leave_overlay()
+        self.clock.sleep(self.config.windows.settle)
+        self.daemon._tick()
+        self.assertEqual(self.backend.cursor, (250, 250))  # centre of GAME
+
+    def test_an_origin_inside_the_returned_to_window_is_left_alone(self):
+        # The cursor belongs where the user left it whenever that is safe.
+        self.build(self.parking_config(), windows={"discord": CHAT},
+                   geometries={CHAT: Rect(1000, 0, 400, 300),
+                               GAME: Rect(0, 0, 500, 500)},
+                   cursor=(100, 120))
+        self.enter_overlay()
+        self.leave_overlay()
+        self.clock.sleep(self.config.windows.settle)
+        self.daemon._tick()
+        self.assertEqual(self.backend.cursor, (100, 120))
+
+    def test_an_unmeasurable_return_window_falls_back_to_the_origin(self):
+        self.build(self.parking_config(), windows={"discord": CHAT},
+                   geometries={CHAT: Rect(1000, 0, 400, 300)},  # none for GAME
+                   cursor=(900, 400))
+        self.enter_overlay()
+        self.leave_overlay()
+        self.clock.sleep(self.config.windows.settle)
+        self.daemon._tick()
+        self.assertEqual(self.backend.cursor, (900, 400))
+
     def test_re_entering_keeps_the_original_cursor_origin(self):
         # The second park must not record the middle of the first overlay as
         # "where the cursor started".
         self.build(self.parking_config(), windows={"discord": CHAT},
-                   geometry=Rect(1000, 0, 400, 300), cursor=(40, 60))
+                   geometries={CHAT: Rect(1000, 0, 400, 300),
+                               GAME: Rect(0, 0, 500, 500)},
+                   cursor=(40, 60))
         self.enter_overlay()
         self.leave_overlay()
         self.enter_overlay()

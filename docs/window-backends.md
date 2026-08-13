@@ -202,6 +202,38 @@ anything about the curve.
 The cursor is restored **before** focus returns to the game, not after: a
 relative motion delivered to a focused game reads as a camera turn.
 
+**Where it is restored to is not always where it started.** Under
+focus-follows-mouse the cursor decides who has focus, so putting it back
+somewhere that is not over the window we just activated hands focus straight
+back to the overlay — the pointer is still sitting on it. Reported from real
+use: it needs the overlay to be larger than what is underneath, so it looks
+rare and random. `Daemon._homecoming` therefore lands on the middle of the
+window being returned to whenever the original position is outside it.
+
+## Exclusive fullscreen, and how to tell
+
+KWin answers the window-state half directly, with no extra tool. Run this and
+click into the game within five seconds:
+
+```bash
+sleep 5 && qdbus6 org.kde.KWin /KWin org.kde.KWin.getWindowInfo "$(kdotool getactivewindow)"
+```
+
+Among the keys returned are `fullscreen`, `keepAbove`, `noBorder`, `type`,
+`resourceClass` and the geometry.
+
+That flag does **not** settle whether the game can be overlaid, though. On
+Wayland, borderless-fullscreen and exclusive-fullscreen both report
+`fullscreen: true`; what actually blocks an overlay is the compositor handing
+the game's buffer straight to the display. The definitive test is to press the
+overlay button and look.
+
+Gotcha §6.2 is inherited from the X11-era setup this replaces, where a game
+could mode-set and grab the display outright. Whether it still bites on KWin
+Wayland is **unmeasured** — the compositor may simply drop out of direct
+scanout when something has to be drawn on top. Measure it on a real game before
+either strengthening or softening the claim.
+
 ---
 
 ## Manual test checklist

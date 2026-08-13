@@ -639,7 +639,12 @@ class Daemon:
             return self._abort()
 
         # Read this before anything can steal focus -- it is the whole point.
-        self._return_to = self._windows.get_active_window()
+        # Unless a return is still pending: focus has not gone back yet, so
+        # what is active right now is the overlay we just left. Asking again
+        # would make the overlay its own return target and strand the user on
+        # it. The window still waiting is the one we actually want.
+        if self._pending_return is None:
+            self._return_to = self._windows.get_active_window()
         target = self._windows.find_window(overlay.window_class)
         if target is None:
             if not overlay.command:
@@ -673,7 +678,10 @@ class Daemon:
         """
         self._state.mode = Mode.IDLE
         self._state.reset_inputs()
-        self._return_to = None
+        # A return already in flight survives a refused entry: failing to open
+        # a second overlay is no reason to strand the user on the first.
+        if self._pending_return is None:
+            self._return_to = None
         self._pending_launch = None
         self._reader.ungrab()
         return False
@@ -740,8 +748,8 @@ class Daemon:
         # then lands on the overlay, which does not care, rather than on a game
         # that would read it as a camera turn.
         if self._parked_from is not None:
-            target, self._parked_from = self._parked_from, None
-            self._warp(*target)
+            origin, self._parked_from = self._parked_from, None
+            self._warp(*self._homecoming(origin))
         if self._windows is not None and self._return_to is not None:
             log.info("returning to %s", self._return_to)
             self._windows.activate_window(self._return_to)
@@ -750,6 +758,29 @@ class Daemon:
             self._reader.set_tick(None)
 
     # -- cursor parking (gotcha §6.3) ----------------------------------
+    def _homecoming(self, origin: tuple[int, int]) -> tuple[int, int]:
+        """Where to leave the cursor on the way out. Usually where it started.
+
+        Not always, though, and this is the case parking exists for. Under
+        focus-follows-mouse the cursor decides who has focus, so putting it back
+        somewhere that is *not* over the window we are about to activate hands
+        focus straight back to the overlay -- the pointer is still sitting on
+        it. It shows up as the overlay bouncing to the front the instant you
+        return, and it needs the overlay to be larger than what is underneath,
+        which is why it looks rare and random.
+
+        So when the cursor started outside the window we are returning to, it
+        goes to the middle of that window instead.
+        """
+        if self._windows is None or self._return_to is None:
+            return origin
+        rect = self._windows.window_geometry(self._return_to)
+        if rect is None or rect.contains(*origin):
+            return origin
+        log.debug("cursor started at %s, outside the window we are returning "
+                  "to; landing on that window instead", origin)
+        return rect.centre
+
     def _park(self, window_id) -> None:
         rect = self._windows.window_geometry(window_id)
         here = self._windows.pointer_position()

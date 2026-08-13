@@ -225,9 +225,10 @@ backend = "auto"       # auto | kwin | x11 | none. Autodetected from the session
 settle = 0.7           # pause between handing the pad back and refocusing the
                        # game, so a button you are still holding can't leak in
 launch_timeout = 10    # how long to wait for a launched app's window
-park_pointer = false   # move the cursor onto the overlay. Only worth enabling
-                       # under focus-follows-mouse, where the cursor sitting
-                       # over the game can pull focus off the overlay
+park_pointer = false   # move the cursor onto the overlay, and back onto your
+                       # game when you return. Worth enabling if you use
+                       # focus-follows-mouse: without it, a cursor left sitting
+                       # on the overlay hands focus straight back to it
 
 [overlays.chat]
 class = "discord"          # regex, case-insensitive, matched on window class
@@ -270,10 +271,14 @@ and quietly ignoring half your bindings.
 - **Overlays need a window backend.** No `kdotool`/`xdotool`, or GNOME on
   Wayland, means the overlay buttons do nothing and say so once at startup.
   Nothing else is affected.
+- **Focus-follows-mouse can bounce you back to the overlay.** Returning to a
+  window smaller than the overlay leaves the cursor sitting on the overlay, and
+  under focus-follows-mouse that is enough to hand focus back to it. Set
+  `park_pointer = true` and padmode puts the cursor on the window it returns
+  you to.
 - **`park_pointer` is unproven.** No compositor here can place the cursor, so
   padmode drives its own pointer and corrects until it arrives. It is off by
-  default and gives up rather than fighting; if you use focus-follows-mouse and
-  it lands short, that is why.
+  default and gives up rather than fighting; if it lands short, that is why.
 
 ## Roadmap
 

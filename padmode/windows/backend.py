@@ -52,6 +52,13 @@ class Rect:
     def centre(self) -> tuple[int, int]:
         return self.x + self.width // 2, self.y + self.height // 2
 
+    def contains(self, x: int, y: int) -> bool:
+        """Is this point inside the window?"""
+        return (
+            self.x <= x < self.x + self.width
+            and self.y <= y < self.y + self.height
+        )
+
 
 def run_tool(argv: list[str], timeout: float = TIMEOUT) -> str | None:
     """Run a window tool and return its stdout, or None if it failed.
