@@ -397,3 +397,32 @@ re-deriving:
 ## 10. Open items
 
 - **Final name.** `padmode` is provisional.
+- **Should we ship a frontend of our own?** *Idea, not a decision, not
+  scheduled.* Today the frontend features are only useful once you have
+  installed something else — v0.4 could not be tested without building
+  `pegasus-frontend-git` from the AUR first, which is exactly the kind of step
+  that makes people bounce off a tool (§3.2). A frontend in the box would make
+  the repo work on its own, with Pegasus or anything else still selectable by
+  config.
+
+  **This reverses a non-goal.** §1 says "Not a game frontend. We integrate
+  with frontends; we don't ship one," and §2 locks the core as frontend-
+  agnostic. Both would have to be edited on purpose, in the same change, with
+  the reason written down — not left to contradict the code.
+
+  Two things worth knowing before deciding, neither of which argues for or
+  against:
+
+  - **The pieces arrive anyway.** v0.5 puts a GUI process with a toolkit in
+    this repo, and v0.6 adds a second library scraper. A frontend is
+    approximately "draw a grid of what the scrapers found and launch it", so
+    the marginal cost after v0.6 is far lower than it looks today. That is an
+    argument for deciding *after* v0.6 rather than now.
+  - **There is a middle option**: a minimal launcher — a pad-navigable grid of
+    installed games, no theming, no scraper ecosystem, no competing with
+    Pegasus or ES-DE — which is a much smaller thing than "a frontend" and
+    might be all that "works out of the box" actually requires.
+
+  If we do ship one, the metadata generators change meaning: they exist to
+  *export* to someone else's frontend, and a frontend of our own would read
+  libraries directly instead.
