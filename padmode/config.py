@@ -18,6 +18,7 @@ from typing import Any
 
 from . import buttons
 from .actions.builtin import ACTIONS
+from .osk import protocol as osk_protocol
 from .windows import backend_names
 
 
@@ -62,6 +63,18 @@ def is_frontend(binding: Binding) -> bool:
     """True if this binding means "go home to the frontend"."""
     return binding == FRONTEND_BINDING
 
+
+#: Marks a binding as "put the on-screen keyboard up". Like ``frontend`` it is
+#: not an action to run, and unlike ``overlay.<name>`` it is not a mode: the
+#: keyboard is a layer over desktop mode, so the pointer keeps working while it
+#: is up (docs/on-screen-keyboard.md).
+OSK_BINDING = "osk"
+
+
+def is_osk(binding: Binding) -> bool:
+    """True if this binding means "show the on-screen keyboard"."""
+    return binding == OSK_BINDING
+
 #: Desktop-mode defaults: gamepad drives the pointer and keyboard.
 DEFAULT_DESKTOP_BINDINGS: dict[str, str] = {
     "A": "click.left",
@@ -79,7 +92,55 @@ DEFAULT_DESKTOP_BINDINGS: dict[str, str] = {
     "R3": "key.alt",
     "RS_RIGHT": "key.tab",
     "RS_LEFT": "key.shift+tab",
+    # The one button with no desktop job of its own, so the keyboard costs
+    # nothing to reach and takes nothing away.
+    "Y": "osk",
 }
+
+#: What the pad does *while the keyboard is up*. These replace the desktop
+#: bindings for as long as it is on screen; the sticks are untouched, so the
+#: pointer keeps working, which is the point of the keyboard being a layer
+#: rather than a mode.
+#:
+#: ``A`` commits even though it is left-click in desktop mode: committing a
+#: character is by far the most frequent thing you do while typing, so it gets
+#: the most natural button, and ``B`` puts the keyboard away in one press when
+#: you want to click something. The d-pad is not listed because it navigates
+#: the grid and is not bindable in v1 -- the renderer needs it.
+DEFAULT_OSK_BINDINGS: dict[str, str] = {
+    "A": "commit",
+    "B": "close",
+    "X": "space",
+    "Y": "back",
+    "START": "enter",
+    "LB": "shift",
+    "RB": "layer",
+}
+
+
+@dataclass(frozen=True)
+class OskConfig:
+    """The on-screen keyboard: a separate process the daemon spawns."""
+
+    enabled: bool = True
+    #: Which screen edge it sits on. It never reserves space, so it covers
+    #: rather than displaces -- there is no way to know where the text field
+    #: you are typing into is, so the choice is left to the user.
+    position: str = "bottom"
+    #: Share of the screen's height the keyboard should take, in percent. The
+    #: width follows from it, since the keys keep their proportions. Height is
+    #: the dimension worth naming: it is how much of the screen you lose, and
+    #: it means the same thing on a laptop panel and a television. Approximate
+    #: rather than exact -- getting it to the pixel would cost a second layout
+    #: pass for no benefit.
+    height: float = 30.0
+    #: Path or soname to preload so gtk4-layer-shell can hook GDK. Empty means
+    #: autodetect (:func:`padmode.osk.preload_library`); set it only if the
+    #: library lives somewhere we do not look.
+    preload: str | None = None
+    bindings: dict[str, str] = field(
+        default_factory=lambda: dict(DEFAULT_OSK_BINDINGS)
+    )
 
 
 @dataclass(frozen=True)
@@ -195,6 +256,7 @@ class Config:
     bindings: dict[str, Binding] = field(default_factory=lambda: dict(DEFAULT_BINDINGS))
     desktop: DesktopConfig = field(default_factory=DesktopConfig)
     windows: WindowsConfig = field(default_factory=WindowsConfig)
+    osk: OskConfig = field(default_factory=OskConfig)
     #: Overlay name -> definition. Empty by default: an overlay needs an app,
     #: and we do not know which apps anyone has.
     overlays: dict[str, Overlay] = field(default_factory=dict)
@@ -274,18 +336,21 @@ def parse(data: dict[str, Any]) -> Config:
             raise ConfigError("general.volume_step must be an integer from 1 to 100")
         cfg = replace(cfg, volume_step=step)
 
-    # Overlays and the frontend first: a binding may name either, so both have
-    # to exist before the bindings that refer to them can be checked.
+    # Overlays, the frontend and the keyboard first: a binding may name any of
+    # them, so all three have to exist before the bindings that refer to them
+    # can be checked.
     cfg = replace(
         cfg,
         windows=_parse_windows(_table(data, "windows")),
         overlays=_parse_overlays(_table(data, "overlays")),
         frontend=_parse_frontend(_table(data, "frontend"), "frontend" in data),
+        osk=_parse_osk(_table(data, "osk")),
     )
     cfg = replace(
         cfg,
         bindings=_parse_bindings(
-            _table(data, "bindings"), cfg.modifier, cfg.overlays, cfg.frontend
+            _table(data, "bindings"), cfg.modifier, cfg.overlays, cfg.frontend,
+            cfg.osk,
         ),
     )
     cfg = replace(cfg, desktop=_parse_desktop(_table(data, "desktop"), cfg))
@@ -413,6 +478,66 @@ def _reject_unknown(table: dict[str, Any], known: set[str], section: str) -> Non
         )
 
 
+def _parse_osk(table: dict[str, Any]) -> OskConfig:
+    """Parse ``[osk]``. Absent is fine; the keyboard is on by default."""
+    _reject_unknown(
+        table, {"enabled", "position", "height", "preload", "bindings"}, "osk"
+    )
+    osk = OskConfig()
+
+    if "enabled" in table:
+        if not isinstance(table["enabled"], bool):
+            raise ConfigError("osk.enabled must be true or false")
+        osk = replace(osk, enabled=table["enabled"])
+
+    if "position" in table:
+        position = table["position"]
+        if position not in ("bottom", "top"):
+            raise ConfigError('osk.position must be "bottom" or "top"')
+        osk = replace(osk, position=position)
+
+    if "height" in table:
+        height = table["height"]
+        if isinstance(height, bool) or not isinstance(height, (int, float)):
+            raise ConfigError("osk.height must be a number of percent, e.g. 30")
+        if not 8 <= height <= 70:
+            raise ConfigError(
+                "osk.height must be between 8 and 70 percent of screen height"
+            )
+        osk = replace(osk, height=float(height))
+
+    if "preload" in table:
+        preload = table["preload"]
+        if not isinstance(preload, str) or not preload:
+            raise ConfigError(
+                "osk.preload must be a path or soname for gtk4-layer-shell, "
+                'e.g. "/usr/lib/libgtk4-layer-shell.so". Leave it out to '
+                "autodetect."
+            )
+        osk = replace(osk, preload=preload)
+
+    merged = dict(DEFAULT_OSK_BINDINGS)
+    for raw_name, value in _table(table, "bindings").items():
+        name = buttons.canonical(raw_name)
+        if name is None:
+            raise ConfigError(f"osk.bindings: unknown button {raw_name!r}")
+        if name in buttons.HATS:
+            raise ConfigError(
+                f"osk.bindings.{name}: the d-pad navigates the keyboard and "
+                "cannot be rebound"
+            )
+        if value is False:
+            merged.pop(name, None)
+            continue
+        if not isinstance(value, str) or value not in osk_protocol.ACTIONS:
+            raise ConfigError(
+                f"osk.bindings.{name} must be one of "
+                f"{', '.join(sorted(osk_protocol.ACTIONS))}, or false to unbind"
+            )
+        merged[name] = value
+    return replace(osk, bindings=merged)
+
+
 def _parse_desktop(table: dict[str, Any], cfg: Config) -> DesktopConfig:
     desktop = DesktopConfig()
 
@@ -452,7 +577,7 @@ def _parse_desktop(table: dict[str, Any], cfg: Config) -> DesktopConfig:
         desktop = replace(desktop, **{key: float(value)})
 
     desktop = replace(
-        desktop, bindings=_parse_desktop_bindings(_table(table, "bindings"))
+        desktop, bindings=_parse_desktop_bindings(_table(table, "bindings"), cfg.osk)
     )
 
     # The enter button is pressed with the modifier held, exactly like a tier-1
@@ -472,7 +597,9 @@ def _parse_desktop(table: dict[str, Any], cfg: Config) -> DesktopConfig:
     return desktop
 
 
-def _parse_desktop_bindings(table: dict[str, Any]) -> dict[str, str]:
+def _parse_desktop_bindings(
+    table: dict[str, Any], osk: OskConfig
+) -> dict[str, str]:
     merged: dict[str, str] = dict(DEFAULT_DESKTOP_BINDINGS)
     for raw_name, value in table.items():
         name = buttons.canonical(raw_name)
@@ -483,15 +610,22 @@ def _parse_desktop_bindings(table: dict[str, Any]) -> dict[str, str]:
             continue
         if not isinstance(value, str):
             raise ConfigError(
-                f"desktop.bindings.{name} must be a string like \"click.left\" "
-                'or "key.alt+tab", or false to unbind'
+                f"desktop.bindings.{name} must be a string like \"click.left\", "
+                '"key.alt+tab" or "osk", or false to unbind'
             )
-        _validate_desktop_action(name, value)
+        _validate_desktop_action(name, value, osk)
         merged[name] = value
     return merged
 
 
-def _validate_desktop_action(name: str, value: str) -> None:
+def _validate_desktop_action(name: str, value: str, osk: OskConfig) -> None:
+    if is_osk(value):
+        if not osk.enabled:
+            raise ConfigError(
+                f"desktop.bindings.{name}: the on-screen keyboard is turned off "
+                "([osk] enabled = false), so nothing would happen"
+            )
+        return
     kind, _, spec = value.partition(".")
     if kind == "click":
         if buttons.parse_click(spec) is None:
@@ -508,7 +642,8 @@ def _validate_desktop_action(name: str, value: str) -> None:
             )
         return
     raise ConfigError(
-        f"desktop.bindings.{name}: {value!r} must start with 'click.' or 'key.'"
+        f"desktop.bindings.{name}: {value!r} must start with 'click.' or 'key.', "
+        "or be \"osk\""
     )
 
 
@@ -517,6 +652,7 @@ def _parse_bindings(
     modifier: str,
     overlays: dict[str, Overlay],
     frontend: Frontend | None = None,
+    osk: OskConfig | None = None,
 ) -> dict[str, Binding]:
     """Merge user bindings over the defaults.
 
@@ -541,7 +677,7 @@ def _parse_bindings(
         if value is False:
             merged.pop(name, None)
             continue
-        merged[name] = _validate_binding(name, value, overlays, frontend)
+        merged[name] = _validate_binding(name, value, overlays, frontend, osk)
 
     if modifier in merged:
         raise ConfigError(
@@ -556,9 +692,18 @@ def _validate_binding(
     value: Any,
     overlays: dict[str, Overlay],
     frontend: Frontend | None = None,
+    osk: OskConfig | None = None,
 ) -> Binding:
-    """A binding is an action id, an overlay, the frontend, or an argv list."""
+    """A binding is an action id, an overlay, the frontend, the keyboard, or
+    an argv list."""
     if isinstance(value, str):
+        if is_osk(value):
+            if osk is not None and not osk.enabled:
+                raise ConfigError(
+                    f"bindings.{name}: the on-screen keyboard is turned off "
+                    "([osk] enabled = false), so nothing would happen"
+                )
+            return value
         overlay = overlay_name(value)
         if overlay is not None:
             if overlay not in overlays:
@@ -579,6 +724,8 @@ def _validate_binding(
             known = sorted(ACTIONS) + [f"{OVERLAY_PREFIX}{o}" for o in sorted(overlays)]
             if frontend is not None:
                 known.append(FRONTEND_BINDING)
+            if osk is None or osk.enabled:
+                known.append(OSK_BINDING)
             raise ConfigError(
                 f"bindings.{name}: unknown action {value!r}. "
                 f"Known: {', '.join(known)}"

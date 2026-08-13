@@ -12,11 +12,13 @@ drive the whole desktop from the couch without reaching for either. Or bind a
 button to an app and have it come up *over* your game, with one press to send
 you straight back — and another button to go home to your game frontend.
 
-> **Status: v0.4.** Media and volume control, a full desktop mode, app
-> overlays that return you to the game, a bindable frontend to land on when
-> the game is gone, and a metadata generator for Heroic libraries. Everything
-> except overlays still works on every Linux desktop with no compositor
-> involvement at all.
+> **Status: v0.5 in progress.** Media and volume control, a full desktop mode,
+> app overlays that return you to the game, a bindable frontend to land on when
+> the game is gone, and a metadata generator for Heroic libraries — all
+> released in v0.4. The on-screen keyboard is built and tested but has not yet
+> been driven from a real gamepad, so treat it as unfinished. Everything except
+> overlays and the keyboard still works on every Linux desktop with no
+> compositor involvement at all.
 
 `padmode` is a provisional name and may change before 1.0.
 
@@ -37,13 +39,20 @@ Media keys and desktop mode need no window management at all, so they run
 anywhere. Overlays have to activate windows, which Wayland deliberately does
 not expose to ordinary clients:
 
-| Desktop | Media + desktop mode | Overlays |
-|---|---|---|
-| KDE Plasma (Wayland) | Yes | Yes — needs `kdotool` |
-| Any X11 desktop | Yes | Yes — needs `xdotool` |
-| Hyprland / sway | Yes | Community backend |
-| GNOME (Wayland) | Yes | **No** — see below |
-| GNOME (X11) | Yes | Yes |
+| Desktop | Media + desktop mode | Overlays | On-screen keyboard |
+|---|---|---|---|
+| KDE Plasma (Wayland) | Yes | Yes — needs `kdotool` | Yes — needs `gtk4-layer-shell` |
+| Any X11 desktop | Yes | Yes — needs `xdotool` | **No** — not in v0.5 |
+| Hyprland / sway | Yes | Community backend | Should work, untested |
+| GNOME (Wayland) | Yes | **No** — see below | **No** — see below |
+| GNOME (X11) | Yes | Yes | **No** — not in v0.5 |
+
+The keyboard is narrower than overlays, and for a different reason. It draws
+itself with `zwlr_layer_shell_v1`, the Wayland protocol for surfaces that sit
+above everything without ever taking keyboard focus — which is what stops a
+keyboard typing into itself. X11 needs a different mechanism entirely, and
+GNOME declines to implement layer-shell at all. Both are separate limitations
+from the overlay one, even though GNOME loses on both counts.
 
 GNOME on Wayland refuses window activation requests from clients, by design.
 Overlays and return-to-game cannot be implemented there without a GNOME Shell
@@ -63,6 +72,8 @@ startup and disables only the overlay buttons.
   handles this
 - Optional: `playerctl` for media keys, `wpctl` (PipeWire) for volume and mic
 - Optional, for overlays only: `kdotool` on KDE Wayland, `xdotool` on X11
+- Optional, for the on-screen keyboard only: `gtk4-layer-shell` and PyGObject
+  (`gtk4-layer-shell python-gobject` on Arch). Wayland sessions only
 
 Missing optional tools disable only the bindings that need them. No
 `playerctl`? Volume control still works, and padmode says so once at startup
@@ -113,6 +124,7 @@ Hold Guide and click the left stick (L3) and the pad takes over your desktop:
 | Right stick (up/down) | Scroll |
 | A / B / X | Left / right / middle click |
 | D-pad | Arrow keys |
+| **Y** | Show the on-screen keyboard |
 | Start / Select | Enter / Escape |
 | **Hold R3** | Hold Alt — opens the window switcher |
 | Right stick (left/right) | Tab / Shift+Tab — step through it |
@@ -132,6 +144,47 @@ Adjust with `pointer_speed`, `dead_zone` and `curve` in config.
 
 While desktop mode is active the pad is held exclusively, so nothing leaks
 through to whatever is running underneath. Leaving hands it straight back.
+
+### On-screen keyboard
+
+Press **Y** in desktop mode and a console-style keyboard appears along the
+bottom of the screen. A desktop you can drive but not type into still sends you
+looking for a keyboard, which rather defeats the point.
+
+| Input | Does |
+|---|---|
+| D-pad | Move around the grid |
+| A | Type the highlighted key |
+| B | Put the keyboard away |
+| X / Y | Space / Backspace |
+| LB / RB | Shift / symbols |
+| Start | Enter |
+| **Left stick** | Still moves the pointer |
+
+It is a *layer*, not a mode: the sticks keep driving the pointer while you
+type, and any button the keyboard does not use keeps its desktop job. Shift
+applies to one letter, or locks if you press it twice. The keyboard never takes
+keyboard focus, so it types into whatever you were pointing at — including
+password fields, since the keystrokes are ordinary virtual-hardware input and
+no application can tell them apart from a real keyboard. It does not take mouse
+input either: clicks pass straight through to whatever is underneath, so it
+never costs you part of the screen.
+
+Set `height` to how much of the screen you want it to take. It sizes itself to
+whichever monitor it appears on, and follows you if you move to another one.
+
+`A` commits rather than left-clicking while the keyboard is up, because
+committing a character is what you are mostly doing. Press `B` first if you
+want to click something.
+
+Everything is overridable in `[osk.bindings]`, except the d-pad, which the grid
+needs.
+
+> **Assumes a US keyboard layout.** padmode types by sending key *codes*, and
+> the character that arrives is whatever your layout maps that key position to.
+> On a non-US layout the letters are fine but the punctuation will not match
+> what the keyboard draws. Fixing that properly means reading your active
+> layout, which padmode does not do yet.
 
 ### Overlays
 
@@ -300,6 +353,18 @@ class = "pegasus"       # where a button bound to "frontend" takes you, and
 command = ["pegasus-fe"]   # where you land if the game exits while an overlay
                            # is up. The command is used only by the button --
                            # the automatic fallback never starts anything.
+
+[osk]
+enabled = true         # the on-screen keyboard
+position = "bottom"    # or "top". It never reserves space, so it covers
+                       # rather than pushes windows around
+height = 30            # percent of screen height; the width scales to match,
+                       # so it looks the same on a laptop panel and a TV
+# preload = "/usr/lib/libgtk4-layer-shell.so"   # only if autodetection fails
+
+[osk.bindings]         # what the pad does while the keyboard is up
+A = "commit"           # commit, close, space, enter, back, shift, layer
+B = "close"            # the d-pad navigates the grid and cannot be rebound
 ```
 
 Button names accept the obvious spellings: `RB` or `R1`, `GUIDE` or `MODE` or
@@ -349,7 +414,7 @@ and quietly ignoring half your bindings.
 | ✅ v0.2 | Virtual mouse/keyboard, desktop mode | No |
 | ✅ v0.3 | Window backends, in-game overlays, return-to-game | KDE + X11 |
 | ✅ **v0.4** | Frontend button and fallback, Heroic metadata generator | KDE + X11 |
-| v0.5 | On-screen keyboard you drive with the pad, like a console | KDE + X11 |
+| 🔨 v0.5 | On-screen keyboard you drive with the pad, like a console | KDE Wayland only |
 | v0.6 | Steam metadata generator | No |
 | v0.7 | Gamepad unlock (opt-in, off by default) | Screensaver D-Bus |
 

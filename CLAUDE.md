@@ -9,11 +9,17 @@ screen with the pad.
 `WeHaveSteamMachineAtHome` (a joke); do not use "Steam Machine" or other Valve
 product names in the shipped tool, package, or docs.
 
-**Status: v0.4.0** (Guide-hold media/volume/mic; uinput virtual
+**Status: v0.5.0-dev** (Guide-hold media/volume/mic; uinput virtual
 mouse/keyboard; desktop mode with bindable stick directions; window backends
 and overlay mode with return-to-game; frontend integration and the Heroic
-metadata generator; 352 tests). This document is the contract. If something
-here is wrong, fix this file in the same change as the code.
+metadata generator; on-screen keyboard; 404 tests). This document is the
+contract. If something here is wrong, fix this file in the same change as the
+code.
+
+The keyboard works from a real gamepad on Plasma 6.7 — it types, spans the
+output, and follows the active monitor. Not yet checked: over a fullscreen
+game, round-trip latency, and a dying renderer seen from the user's seat. The
+unticked boxes in `docs/on-screen-keyboard.md` are the list.
 
 ---
 
@@ -45,7 +51,7 @@ is no longer a second implementation to consult or stay compatible with.
 | Bindings | **Good defaults, fully overridable** via config |
 | Unlock feature | **In-repo, opt-in, off by default**, with a blunt security warning |
 | Metadata generators | **Same repo, own subcommand** (`padmode metadata …`), imported lazily by the CLI and **never by the daemon** — enforced by a test, not by good intentions |
-| Anything that draws | **A separate process.** The on-screen keyboard (v0.5) is the first, and its GUI toolkit is an *optional runtime dependency* probed like `playerctl`: missing means that one feature is disabled, never that the daemon fails to start |
+| Anything that draws | **A separate process.** The on-screen keyboard (v0.5) is the first: GTK4 + `gtk4-layer-shell`, spawned as `python -m padmode.osk`, talking line-JSON over a pipe. Its toolkit is an *optional runtime dependency* probed like `playerctl` — missing means that one feature is disabled, never that the daemon fails to start, and a test fails if anything on the daemon's import path reaches `gi` |
 | Packaging | **AUR + `install.sh`** |
 | Installer scope | **Both**: prompted, explained DE changes *and* a printed manual-steps mode for people who won't run them |
 | License | **GPL-3.0** (ecosystem fit — input-remapper, KDE, evdev tooling are GPL) |
@@ -75,13 +81,19 @@ One process opens the gamepad and never lets go of ownership. Modes:
 - `guide_held` — momentarily grabbed; buttons are commands, not game input.
 - `desktop` — virtual mouse/keyboard active; pad drives the desktop.
 - `overlay` — like `desktop`, but we remember a window to return to.
-- `osk` — *v0.5*, on-screen keyboard. The one mode that may need to be
-  **concurrent** with another (the pointer stays useful while typing), which
-  the state machine has never had to express. See
-  `docs/on-screen-keyboard.md`.
 - `unlock` — virtual keyboard types digits at the lock screen (opt-in).
 
 Mode transitions are the whole app. Keep them in one readable place.
+
+**The on-screen keyboard is not a mode.** It was listed here as one until v0.5,
+on the grounds that it would need to be *concurrent* with another mode — the
+pointer stays useful while typing — which the state machine had never had to
+express. Building it showed the concurrency never needed expressing: `osk` is a
+**flag on the state**, valid only while the mode is in `PAD_MODES`. While it is
+set the d-pad and the buttons in `[osk.bindings]` belong to the keyboard, every
+other button keeps its desktop binding, and the sticks are untouched. One
+boolean and one routing rule, instead of a fifth mode that would have been 90%
+a copy of desktop. See `docs/on-screen-keyboard.md`.
 
 ### 3.2 Two things the old setup did that we delete on day one
 
@@ -159,7 +171,7 @@ Core stays frontend-agnostic: nothing here knows what Pegasus is.
 | ~~**v0.2**~~ ✅ | uinput virtual device, desktop mode (pad as mouse), return button | **None** — confirmed: no window code was needed |
 | ~~**v0.3**~~ ✅ | Window backends, overlay mode, return-to-game | KDE + X11 |
 | ~~**v0.4**~~ ✅ | Frontend integration (return target), Heroic metadata generator | KDE + X11 |
-| **v0.5** | On-screen keyboard, console style (`docs/on-screen-keyboard.md`) | KDE + X11 — **layer-shell**, not window activation |
+| **v0.5** 🔨 | On-screen keyboard, console style (`docs/on-screen-keyboard.md`) | **KDE Wayland only** — layer-shell, not window activation. X11 was dropped from this version: it needs override-redirect, which is different code, not a flag. The keyboard is therefore *narrower* than overlays, and the README says so |
 | **v0.6** | Steam metadata generator (specified, not built) | None |
 | **v0.7** | Unlock module (opt-in, off by default) | Screensaver D-Bus |
 
@@ -340,9 +352,11 @@ padmode/
   metadata/heroic.py        # Heroic library -> metadata; never imported above
   metadata/pegasus.py       # the Pegasus writer
   metadata/steam.py         # *v0.6*, specified in docs/
-  osk/                      # *v0.5* the keyboard: its own process, its own
-                            # toolkit, launched by the daemon and never
-                            # imported by it
+  osk/protocol.py           # line-JSON messages; stdlib, imported by both
+  osk/client.py             # the daemon's end: spawn, talk, bury. stdlib
+  osk/layout.py             # the grid, navigation and shift. stdlib
+  osk/renderer.py           # GTK4 + layer-shell. Never imported by the daemon
+  osk/__main__.py           # `python -m padmode.osk`
   modes/                    # *later* split out of daemon.py when it earns it
 packaging/                  # udev rule, systemd units; *PKGBUILD*
 tests/                      # unit + synthetic-uinput integration
@@ -386,9 +400,11 @@ These were distilled from a working implementation; prefer them over
 re-deriving:
 
 - `docs/virtual-input.md` — v0.2 desktop mode and the unlock module (v0.7).
-- `docs/on-screen-keyboard.md` — v0.5. Read the risks section before writing
-  any of it: our own surface may show up in `find_window` the way plasmashell's
-  does, which would poison overlay matching and return targets.
+- `docs/on-screen-keyboard.md` — v0.5 as built, with the measurements. Our own
+  surface **does** show up in `find_window`, reports the interpreter's name and
+  cannot be renamed — but it is never the *active* window, so return targets
+  are safe. Also: `LD_PRELOAD` is mandatory, the cairo renderer is 14× faster
+  to first frame, and typing through uinput assumes a US layout.
 - `docs/window-backends.md` — backends, overlay sequencing, the return
   fallback, cursor parking, and the manual checklist §5 requires.
 - `docs/metadata-generators.md` — the Heroic generator as built, and the Steam

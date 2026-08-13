@@ -36,6 +36,7 @@ def _on_sigterm(_signum: int, _frame) -> None:
 
 def cmd_run(args: argparse.Namespace, config: Config) -> int:
     from .input import GamepadReader, VirtualInput
+    from .osk.client import OskClient
     from .windows import detect
 
     signal.signal(signal.SIGTERM, _on_sigterm)
@@ -52,8 +53,12 @@ def cmd_run(args: argparse.Namespace, config: Config) -> int:
     # desktop mode, so someone who never uses it gets no phantom hardware.
     # Overlays need them too, even with desktop mode switched off.
     virtual = VirtualInput() if config.desktop.enabled or config.overlays else None
+    # Same shape: constructed, not started. The renderer process appears when
+    # a pad-driven mode does, and a session without gtk4-layer-shell simply
+    # never gets one -- the daemon does not care either way.
+    osk = OskClient(config.osk) if config.osk.enabled else None
     try:
-        Daemon(config, reader, runner, virtual, detection.backend).run()
+        Daemon(config, reader, runner, virtual, detection.backend, osk).run()
     except KeyboardInterrupt:
         pass
     return 0
@@ -255,6 +260,25 @@ def cmd_config(args: argparse.Namespace, config: Config) -> int:
     else:
         print("\n# no frontend configured -- overlay mode has nowhere to fall")
         print("# back to if the game exits while the overlay is up")
+
+    osk = config.osk
+    print("\n[osk]")
+    print(f"enabled = {str(osk.enabled).lower()}")
+    print(f'position = "{osk.position}"')
+    print(f"height = {osk.height:g}       # percent of screen height")
+    if osk.preload:
+        print(f'preload = "{osk.preload}"')
+    else:
+        # Resolved here rather than guessed: this is the difference between a
+        # keyboard and a focus-stealing window, so it is worth showing.
+        from .osk import preload_library
+
+        found = preload_library()
+        print(f"# preload = {found!r}" if found else
+              "# gtk4-layer-shell not found -- the keyboard is unavailable")
+    print("\n[osk.bindings]        # the d-pad navigates and cannot be rebound")
+    for name, action in sorted(osk.bindings.items()):
+        print(f'{name} = "{action}"')
     return 0
 
 

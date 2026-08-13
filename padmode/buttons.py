@@ -278,3 +278,52 @@ def parse_keys(spec: str) -> list[int] | None:
 def parse_click(spec: str) -> int | None:
     """Parse a mouse button name like ``"left"`` into its EV_KEY code."""
     return CLICKS.get(spec.strip().upper())
+
+
+# Characters the on-screen keyboard can type, as the keys you would press on a
+# US layout. Punctuation is spelled out because there is no rule connecting a
+# character to its key -- the kernel names keys by position, not by meaning.
+_UNSHIFTED: dict[str, str] = {
+    " ": "SPACE", "`": "GRAVE", "-": "MINUS", "=": "EQUAL",
+    "[": "LEFTBRACE", "]": "RIGHTBRACE", ";": "SEMICOLON",
+    "'": "APOSTROPHE", "\\": "BACKSLASH", ",": "COMMA", ".": "DOT",
+    "/": "SLASH",
+}
+
+_SHIFTED: dict[str, str] = {
+    "~": "GRAVE", "!": "1", "@": "2", "#": "3", "$": "4", "%": "5",
+    "^": "6", "&": "7", "*": "8", "(": "9", ")": "0", "_": "MINUS",
+    "+": "EQUAL", "{": "LEFTBRACE", "}": "RIGHTBRACE", ":": "SEMICOLON",
+    '"': "APOSTROPHE", "|": "BACKSLASH", "<": "COMMA", ">": "DOT",
+    "?": "SLASH",
+}
+
+
+def keys_for_char(ch: str) -> list[int] | None:
+    """Key codes that type ``ch``, modifiers first, or None if we cannot.
+
+    Shaped like :func:`parse_keys` so the result feeds straight into
+    ``VirtualInput.tap_keys``.
+
+    **This assumes a US layout, and cannot do otherwise.** We type by sending
+    kernel key codes, which name keys by *position*; the character that comes
+    out is whatever the compositor's active xkb layout maps that position to.
+    On any other layout the key the keyboard draws and the character the
+    application receives will disagree for at least the punctuation. That is
+    the price of typing through uinput rather than an input method, and it is
+    the same price that buys us password fields and every toolkit
+    (docs/on-screen-keyboard.md).
+    """
+    if len(ch) != 1:
+        return None
+    if ch in _UNSHIFTED:
+        return [KEYS[_UNSHIFTED[ch]]]
+    if ch in _SHIFTED:
+        return [KEYS["SHIFT"], KEYS[_SHIFTED[ch]]]
+    if ch.isdigit():
+        return [KEYS[ch]]
+    if "a" <= ch <= "z":
+        return [KEYS[ch.upper()]]
+    if "A" <= ch <= "Z":
+        return [KEYS["SHIFT"], KEYS[ch]]
+    return None
