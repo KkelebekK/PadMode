@@ -642,6 +642,11 @@ class Daemon:
         #: same convention as ``virtual`` and ``windows``: absent means the one
         #: feature is off, never that anything fails.
         self._osk = osk
+        #: Key codes the keyboard has latched down (ctrl/alt/super). Tracked
+        #: here rather than trusted to the renderer: a modifier left held is a
+        #: desktop nobody can use, and the renderer is the thing most likely to
+        #: not be around to tidy up after itself.
+        self._osk_held: set[int] = set()
         self._state = State()
         #: Window to hand focus back to when overlay mode ends.
         self._return_to = None
@@ -836,8 +841,21 @@ class Daemon:
 
     def _stop_osk(self) -> None:
         self._state.osk = False
+        self._release_osk_mods()
         if self._osk is not None:
             self._osk.stop()
+
+    def _release_osk_mods(self) -> None:
+        """Let go of every modifier the keyboard latched.
+
+        The renderer releases them itself when it goes away, which covers the
+        ordinary path. This is the backstop for the ones where it never gets
+        to: it died, or the mode ended out from under it.
+        """
+        if self._virtual is not None:
+            for code in sorted(self._osk_held):
+                self._virtual.key(code, False)
+        self._osk_held.clear()
 
     def _apply_osk(self, op: OskOp) -> None:
         if op.kind == "open":
@@ -866,6 +884,9 @@ class Daemon:
         self._state.osk = False
         if self._osk is not None:
             self._osk.hide()
+        # After the hide: the renderer sends its own releases in response, and
+        # this catches whatever it did not.
+        self._release_osk_mods()
 
     def _osk_hints(self) -> dict[str, str]:
         """Action -> the button bound to it, so the keyboard can label itself.
@@ -890,6 +911,7 @@ class Daemon:
             # the keyboard, so desktop mode carries on with a working pointer.
             log.warning("the on-screen keyboard exited; carrying on without it")
             self._state.osk = False
+            self._release_osk_mods()
 
     def _handle_osk(self, kind: str, fields: dict) -> None:
         if kind == osk_protocol.TYPE:
@@ -907,8 +929,26 @@ class Daemon:
             if not codes or any(code is None for code in codes):
                 return
             self._apply(VirtualOp("tap", tuple(code for code in codes if code)))
+        elif kind == osk_protocol.HOLD:
+            names = fields.get("keys")
+            if not isinstance(names, list) or self._virtual is None:
+                return
+            down = bool(fields.get("down"))
+            codes = [buttons.KEYS.get(str(part).upper()) for part in names]
+            if not codes or any(code is None for code in codes):
+                return
+            for code in codes:
+                # Genuinely held, not remembered: the compositor sees a real
+                # modifier, so Super+A reaches a global shortcut and Ctrl+click
+                # works, exactly as they would from a hardware keyboard.
+                self._virtual.key(code, down)
+                if down:
+                    self._osk_held.add(code)
+                else:
+                    self._osk_held.discard(code)
         elif kind == osk_protocol.CLOSED:
             self._state.osk = False
+            self._release_osk_mods()
         elif kind == osk_protocol.FAILED:
             log.warning("on-screen keyboard: %s", fields.get("reason", "unavailable"))
             self._stop_osk()

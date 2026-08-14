@@ -46,6 +46,9 @@ class Emit:
     kind: str
     text: str | None = None
     keys: tuple[str, ...] = ()
+    #: For :data:`~padmode.osk.protocol.HOLD`: whether the modifier goes down
+    #: or comes back up.
+    down: bool = False
 
 
 def _chars(row: str) -> tuple[Key, ...]:
@@ -73,12 +76,17 @@ SYMBOL_ROWS: tuple[str, ...] = (
 
 #: Shared bottom row. These have dedicated pad buttons too, but they are on the
 #: grid as well: nothing should require memorising a shortcut.
+#:
+#: The widths total exactly the ten columns of a letter row, so the two line up.
 ACTION_ROW: tuple[Key, ...] = (
     Key(label="⇧", action="shift"),
+    Key(label="ctrl", action="ctrl"),
+    Key(label="alt", action="alt"),
+    Key(label="super", action="super"),
     Key(label="?#", action="layer"),
-    Key(label="space", action="space", width=4),
+    Key(label="space", action="space", width=3),
     Key(label="⌫", action="back"),
-    Key(label="↵", action="enter", width=2),
+    Key(label="↵", action="enter"),
 )
 
 
@@ -106,6 +114,11 @@ class Keyboard:
     row: int = 1
     col: int = 0
     shift: str = SHIFT_OFF
+    #: Latched modifier actions ("ctrl", "alt", "super"), each genuinely held
+    #: down on the virtual keyboard until pressed again. Deliberately *not*
+    #: one-shot like shift: holding Alt while stepping the window switcher, or
+    #: Ctrl while clicking, both need the modifier to outlive one keystroke.
+    mods: set[str] = field(default_factory=set)
     #: Set when the last action changed something the renderer must redraw
     #: beyond the highlight (the layer, or the shift indicator).
     dirty: bool = field(default=False, compare=False)
@@ -178,6 +191,16 @@ class Keyboard:
             self.col = min(self.col, len(self.rows[self.row]) - 1)
             self.dirty = True
             return None
+        if name in protocol.MODIFIERS:
+            down = name not in self.mods
+            if down:
+                self.mods.add(name)
+            else:
+                self.mods.discard(name)
+            self.dirty = True
+            return Emit(
+                protocol.HOLD, keys=(protocol.MODIFIERS[name],), down=down
+            )
         if name == "close":
             return Emit(protocol.CLOSED)
         if name == "space":
@@ -187,6 +210,21 @@ class Keyboard:
         if name == "commit":
             return self.press()
         return None
+
+    def release_mods(self) -> tuple[Emit, ...]:
+        """Let every latched modifier up.
+
+        Called whenever the keyboard leaves the screen. A latch that outlived
+        the keyboard would strand the desktop with Ctrl or Super held down,
+        which is unusable and gives no clue where it came from.
+        """
+        emits = tuple(
+            Emit(protocol.HOLD, keys=(protocol.MODIFIERS[name],), down=False)
+            for name in sorted(self.mods)
+        )
+        self.mods.clear()
+        self.dirty = bool(emits)
+        return emits
 
     def _type(self, key: Key) -> Emit | None:
         if key.char is None:

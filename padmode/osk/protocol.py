@@ -40,6 +40,12 @@ READY = "ready"
 TYPE = "type"
 #: Press a named key or combination, e.g. ``["BACKSPACE"]``.
 KEY = "key"
+#: Hold a modifier down, or let it up: ``keys`` and ``down``. Genuinely held on
+#: the virtual keyboard rather than remembered and prepended, so the compositor
+#: sees a real modifier and Super+A, Ctrl+click and held Alt all behave the way
+#: they would from hardware. The daemon owns releasing them again -- a latch
+#: that outlived the keyboard would strand the desktop with Super down.
+HOLD = "hold"
 #: The user dismissed the keyboard from within.
 CLOSED = "closed"
 #: The renderer cannot run. ``reason`` says why, once, in plain words.
@@ -55,7 +61,18 @@ ACTIONS = frozenset({
     "shift",
     "layer",     # letters <-> symbols
     "close",
+    # Latching modifiers: press once to hold, again to release.
+    "ctrl",
+    "alt",
+    "super",
 })
+
+#: Actions that latch a modifier, and the key each holds down.
+MODIFIERS: dict[str, str] = {
+    "ctrl": "LEFTCTRL",
+    "alt": "LEFTALT",
+    "super": "LEFTMETA",
+}
 
 
 def encode(kind: str, **fields: Any) -> bytes:

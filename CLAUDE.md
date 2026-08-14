@@ -329,6 +329,32 @@ Learned the hard way; re-learning them is expensive.
    up afterwards, which is what §3.4 checks. Assume the same of any backend
    operation that takes an id.
 
+7. **The grab eats the modifier's release, and the game keeps the button.**
+   We read without grabbing until the modifier goes down, so its *press* has
+   already been delivered to everything else reading the device. We then grab,
+   and the matching *release* arrives while we hold it — so nobody else ever
+   sees the button come up, and a game is left with the modifier latched down.
+
+   Measured with a second, non-grabbing reader on a Sunshine virtual pad with
+   `modifier = "SELECT"`: **42 presses reached it, and one release.** That one
+   escaped only because it followed the press that *left* desktop mode, which
+   drops the grab first — which is precisely why the reported symptom was "it
+   works once per exit, then stops".
+
+   This is the real reason `GUIDE` is the default modifier, and a stronger one
+   than "games might bind Guide": Guide is the button games reliably ignore, so
+   it is the only one whose latching costs nothing. **Never suggest moving
+   `modifier` onto SELECT or START.** The README recommended exactly that until
+   this was measured — advice that breaks games, written from the same
+   plausible reasoning §4 warns about.
+
+   There is no small fix. The release cannot be un-eaten, and delaying the grab
+   until a bound button fires only moves the leak onto that button. The real
+   fix is the passthrough question in §10.
+
+   *Numbered 7 rather than inserted in order because §6.1, §6.2, §6.3 and §6.6
+   are cited by name from other documents and from the code.*
+
 ---
 
 ## 7. Planned layout
@@ -442,3 +468,36 @@ re-deriving:
   If we do ship one, the metadata generators change meaning: they exist to
   *export* to someone else's frontend, and a frontend of our own would read
   libraries directly instead.
+
+- **Should padmode own the pad and re-emit a virtual one?** *Question raised by
+  a measurement, not a plan.* Gotcha §6.7: because we only grab once the
+  modifier is already down, the game receives the press and never the release,
+  and is left with that button latched. It is invisible with `GUIDE` — games
+  ignore it — and unusable with any button a game actually reads.
+
+  The fix used by Steam Input and gamescope is **permanent ownership**: grab
+  the physical pad at startup, create a virtual gamepad, and forward events to
+  it. Games read the virtual device, so we decide exactly what they see —
+  including replaying a modifier tap once we know it did not begin a chord.
+
+  **This reverses a locked decision.** §3.1 says `idle` means "the pad belongs
+  to whatever is running. We read **without grabbing**", and that is what makes
+  padmode additive rather than something that sits between you and your games.
+  Ownership would have to be edited there deliberately, with the reason
+  written down.
+
+  What it would cost, so nobody re-derives it:
+
+  - A virtual gamepad mirroring every button and axis of the real device,
+    including force feedback, which we do not forward today and which games do
+    use.
+  - Every application that resolves gamepads by name or by `/dev/input` order
+    would see a different device. Steam's own controller configuration would
+    need to be repointed.
+  - The `finally` that releases the grab (§4) stops being a courtesy and
+    becomes the difference between "padmode crashed" and "the pad vanished
+    mid-game".
+
+  Not scheduled. Revisit if a pad without a usable Guide button turns up, or if
+  someone wants the modifier on a button their games read. Until then the
+  honest answer is the README's: keep `modifier = "GUIDE"`.

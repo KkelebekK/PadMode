@@ -28,7 +28,7 @@ unticked.
 | Dependencies | The GUI toolkit is **optional and probed at runtime**, exactly like `playerctl` and `kdotool`. The daemon's own dependencies stay stdlib + `python-evdev` |
 | Grid and selection | Owned by the **renderer** |
 | Typing | The **daemon** types on the virtual keyboard it already creates (v0.2) |
-| Scope for v1 | Xbox-style: letters, digits, a symbol layer, shift, space, backspace, enter |
+| Scope for v1 | Xbox-style: letters, digits, a symbol layer, shift, space, backspace, enter — **plus latching Ctrl/Alt/Super**, which consoles have no use for and a desktop cannot do without |
 | Toolkit | **GTK4 + `gtk4-layer-shell`** via PyGObject |
 | Session support | **Wayland only.** X11 disables the keyboard with one line |
 | Is it a mode? | **No** — a layer over a pad-driven mode |
@@ -132,6 +132,43 @@ least for punctuation. This is the price of typing through uinput rather than
 an input method — the same price that buys password fields and every toolkit.
 It is not a bug to be fixed by adjusting the grid; fixing it properly means
 reading the active layout, which nothing here does.
+
+### Latching modifiers
+
+Ctrl, Alt and Super are on the action row and **latch**: press once to hold,
+press again to release. This is the one deliberate departure from console
+parity — an Xbox keyboard has no Ctrl because there is nothing to press it
+against, and a desktop is nothing but things to press it against.
+
+They are **genuinely held down on the virtual keyboard**, not remembered and
+prepended to the next keystroke. That distinction is the whole feature:
+
+- a global shortcut sees a real modifier, so `Super+A` opens a launcher;
+- `Ctrl` stays down across a *click*, not just a keystroke, because the
+  pointer is still live while the keyboard is up;
+- `Alt` can be held across several keystrokes, which is what stepping a window
+  switcher needs.
+
+None of that works if the modifier is a note-to-self applied to one commit.
+
+Shift is deliberately *not* one of these: it stays one-shot-then-lock, because
+capitalising a single letter is the common case and a latch would cost two
+extra presses every time.
+
+**The release paths matter more than the presses.** A latch that outlived the
+keyboard would leave the desktop with Super held and no clue why. So it is
+released when the keyboard hides, when it closes, when the mode ends, and — as
+a backstop in the daemon rather than the renderer — if the renderer dies while
+holding one. The daemon tracks exactly which codes *it* latched, so releasing
+them cannot disturb a key some other binding is holding.
+
+Verified end to end without a gamepad, by feeding synthetic pad events into a
+real daemon and watching the virtual keyboard device: `LEFTMETA down, A down,
+A up, LEFTMETA up`, and a Vicinae window appearing where there was none.
+
+One consequence worth knowing rather than fixing: latching Super and unlatching
+it without pressing anything in between opens KDE's application launcher. We
+send a genuine press and release, and a hardware keyboard does exactly the same.
 
 ### The protocol
 

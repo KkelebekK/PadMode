@@ -335,7 +335,9 @@ class Renderer:
             for key in row:
                 label = Gtk.Label(label=self.keyboard.label_of(key))
                 label.add_css_class("key")
-                if key.width > 1:
+                if key.width > 1 or len(key.label) > 2:
+                    # Word labels (ctrl, alt, super, space) need the smaller
+                    # font to fit a key that is one column wide.
                     label.add_css_class("wide")
                 label.set_size_request(*self._key_size(key))
                 box.append(label)
@@ -353,9 +355,12 @@ class Renderer:
                 widget.set_label(self.keyboard.label_of(key))
                 highlighted = r == self.keyboard.row and c == self.keyboard.col
                 engaged = (
-                    key.action == "shift"
-                    and self.keyboard.shift != layout.SHIFT_OFF
-                ) or (key.action == "layer" and self.keyboard.layer == layout.SYMBOLS)
+                    (key.action == "shift"
+                     and self.keyboard.shift != layout.SHIFT_OFF)
+                    or (key.action == "layer"
+                        and self.keyboard.layer == layout.SYMBOLS)
+                    or (key.action in self.keyboard.mods)
+                )
                 _css(widget, "highlight", highlighted)
                 _css(widget, "engaged", engaged and not highlighted)
         self._hint_label.set_label(self._hint_text())
@@ -383,7 +388,7 @@ class Renderer:
             self._show()
             return
         if kind == protocol.HIDE:
-            self.window.set_visible(False)
+            self._put_away()
             return
         if kind == protocol.STEP:
             direction = fields.get("dir")
@@ -423,9 +428,20 @@ class Renderer:
             write(protocol.encode(protocol.TYPE, text=emit.text))
         elif emit.kind == protocol.KEY:
             write(protocol.encode(protocol.KEY, keys=list(emit.keys)))
+        elif emit.kind == protocol.HOLD:
+            write(protocol.encode(
+                protocol.HOLD, keys=list(emit.keys), down=emit.down
+            ))
         elif emit.kind == protocol.CLOSED:
-            self.window.set_visible(False)
+            self._put_away()
             write(protocol.encode(protocol.CLOSED))
+
+    def _put_away(self) -> None:
+        """Leave the screen, letting go of anything we were holding."""
+        for emit in self.keyboard.release_mods():
+            self.send(emit)
+        self._refresh()
+        self.window.set_visible(False)
 
     def feed(self, data: bytes) -> None:
         """Consume whatever arrived on stdin, handling partial lines."""

@@ -143,6 +143,66 @@ class TestTypingAndShift(unittest.TestCase):
                         self.assertIsNotNone(buttons.keys_for_char(key.char.upper()))
 
 
+class TestLatchingModifiers(unittest.TestCase):
+    """Ctrl/Alt/Super hold until pressed again, unlike shift."""
+
+    def setUp(self):
+        self.kb = layout.Keyboard()
+
+    def test_pressing_a_modifier_holds_it_down(self):
+        emit = self.kb.act("super")
+        self.assertEqual(emit, layout.Emit(protocol.HOLD, keys=("LEFTMETA",), down=True))
+        self.assertIn("super", self.kb.mods)
+
+    def test_pressing_it_again_lets_it_up(self):
+        self.kb.act("super")
+        emit = self.kb.act("super")
+        self.assertEqual(emit.down, False)
+        self.assertNotIn("super", self.kb.mods)
+
+    def test_a_latch_survives_a_keystroke(self):
+        # The whole difference from shift: Super+A must not clear Super, or
+        # holding Alt to step a window switcher would be impossible.
+        self.kb.act("super")
+        self.kb.press()
+        self.assertIn("super", self.kb.mods)
+
+    def test_several_at_once(self):
+        for name in ("ctrl", "alt", "super"):
+            self.kb.act(name)
+        self.assertEqual(self.kb.mods, {"ctrl", "alt", "super"})
+
+    def test_leaving_the_screen_releases_every_latch(self):
+        # A modifier left held is a desktop nobody can use.
+        self.kb.act("ctrl")
+        self.kb.act("super")
+        emits = self.kb.release_mods()
+        self.assertEqual({e.keys[0] for e in emits}, {"LEFTCTRL", "LEFTMETA"})
+        self.assertTrue(all(e.down is False for e in emits))
+        self.assertEqual(self.kb.mods, set())
+
+    def test_releasing_nothing_emits_nothing(self):
+        self.assertEqual(self.kb.release_mods(), ())
+
+    def test_every_modifier_names_a_real_key(self):
+        for action, key in protocol.MODIFIERS.items():
+            with self.subTest(action=action):
+                self.assertIn(key, buttons.KEYS)
+                self.assertIn(action, protocol.ACTIONS)
+
+    def test_they_are_reachable_on_the_grid(self):
+        # Bindable to pad buttons too, but nothing should *require* memorising
+        # a shortcut.
+        actions = {
+            key.action for row in layout.LAYERS[layout.LETTERS] for key in row
+        }
+        self.assertTrue(set(protocol.MODIFIERS) <= actions)
+
+    def test_the_action_row_is_as_wide_as_a_letter_row(self):
+        rows = layout.LAYERS[layout.LETTERS]
+        self.assertEqual(sum(key.width for key in rows[-1]), len(rows[0]))
+
+
 class TestLayers(unittest.TestCase):
     def test_switching_layer_keeps_the_highlight_inside_the_grid(self):
         kb = layout.Keyboard()

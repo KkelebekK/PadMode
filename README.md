@@ -161,6 +161,16 @@ looking for a keyboard, which rather defeats the point.
 | Start | Enter |
 | **Left stick** | Still moves the pointer |
 
+The bottom row is `⇧ ctrl alt super ?# space ⌫ ↵`. **Ctrl, Alt and Super
+latch** — press once to hold, press again to let go — so `Super`+`a` opens your
+launcher, `Ctrl` stays down while you click something with the stick, and `Alt`
+can be held across several keys. They release themselves whenever the keyboard
+goes away, so you can't strand your desktop with a modifier stuck down.
+
+(Latching Super and unlatching it without pressing anything opens KDE's
+launcher. That's a real key press and release, and a hardware keyboard does the
+same thing.)
+
 It is a *layer*, not a mode: the sticks keep driving the pointer while you
 type, and any button the keyboard does not use keeps its desktop job. Shift
 applies to one letter, or locks if you press it twice. The keyboard never takes
@@ -376,10 +386,27 @@ and quietly ignoring half your bindings.
 
 ## Known limitations
 
-- **The game also sees the Guide press.** padmode reads without grabbing until
-  the modifier goes down, so the press that *starts* the grab has already been
-  delivered. If your game binds Guide (Steam's overlay does), it will react.
-  Set `modifier` to `SELECT` or `START` to avoid it.
+- **The game sees the modifier press, and never the release.** padmode reads
+  without grabbing until the modifier goes down, so the press that *starts* the
+  grab has already reached the game. The release then arrives while padmode
+  holds the grab — so only padmode sees it, and the game is left believing the
+  button is still held down.
+
+  Measured over Sunshine with `modifier = "SELECT"`, watching the pad from a
+  second reader the way a game does: **42 presses got through, and one
+  release.** The single release escaped only because it followed the press that
+  *left* desktop mode, which drops the grab first — so the button un-latches
+  once per exit and then sticks again.
+
+  This is the real reason the default modifier is **Guide**: it is the one
+  button games ignore. Do not move `modifier` onto a button your games use.
+  `SELECT` or `START` will leave that button latched mid-game, which is much
+  worse than Guide being seen. If your setup genuinely cannot send Guide — some
+  streaming clients' on-screen pads can't — the fix is on the client, not here.
+
+  Solving it properly means padmode holding the pad permanently and re-emitting
+  a virtual gamepad for games to read, the way Steam Input does. That is a
+  deliberate architecture change, recorded in CLAUDE.md §10 and not scheduled.
 - **Media control needs an MPRIS-capable player.** `playerctl` talks to players
   over MPRIS. Most expose it by default, but some need it switched on — the
   YouTube Music desktop app, for one, only shows up once its MPRIS / API-server
