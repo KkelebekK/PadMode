@@ -35,6 +35,8 @@ open items are listed in §Still unmeasured.
 | Is it a mode? | **No** — a layer over a pad-driven mode |
 | How it opens | The value `osk` in `[desktop.bindings]` (default `Y`) or `[bindings]` |
 | Renderer lifecycle | **Pre-warmed** on entering a pad mode, unmapped until needed |
+| Pointer while up | **Parked.** The left stick drives the grid instead — the shortcut map had already taken every mouse button |
+| Auto-open | **On by default**, needing desktop accessibility switched on. Opens only just after a click of ours; closes only if it opened itself |
 
 The first two follow the metadata generators (CLAUDE.md §2): same repo,
 separate process, never imported by the daemon. Nothing that draws pixels
@@ -63,23 +65,28 @@ understood rather than discovered later:
   "confusing, self-consistent nonsense" when it goes wrong. Mitigated below,
   and the mitigation is not optional.
 
-### What keeps that safe in v1: navigate with the d-pad
+### What keeps that safe: the renderer never sees an analogue value
 
-**The sticks do not drive the OSK in v1.** The d-pad and the face buttons do,
-which is how both consoles work anyway.
+The renderer is only ever sent **discrete steps**. That was true when the d-pad
+was the only thing that navigated, and it stayed true when the left stick was
+added.
 
 This matters more than it looks. Every expensive lesson in this project's
 input handling — spring-back overshoot crossing the opposite threshold,
 `stick_dominance`, `stick_settle`, `button_debounce` — is about turning noisy
 analogue deflection into discrete intent. A d-pad emits discrete hat events
-already. Keeping the sticks out of v1 means the renderer never has to
-re-implement any of that, and the "two processes in the input path" risk drops
-to forwarding button presses.
+already, so it needed none of it; a stick needs all of it.
 
-If stick navigation is added later, the digestion belongs in the **daemon** —
-it already has that logic, tested — and the renderer should receive the same
-discrete `step` messages a d-pad produces. Do not re-derive dead zones in the
-renderer.
+So when the stick was added, the digestion went in the **daemon**, which
+already had that logic and its tests. The extraction was mechanical: the
+"which direction just fired" decision came out of `_stick_direction_ops` into a
+helper that both callers share, with a predicate for "does this direction mean
+anything here" so an axis still only disarms itself for a direction that
+actually fires. The renderer received the same `step` messages it already
+understood and needed no changes at all — and the keyboard inherited the
+overshoot handling for free rather than growing its own.
+
+Do not re-derive dead zones in the renderer.
 
 **No debounce on the keyboard's buttons**, deliberately. The releases held back
 in desktop mode exist because a stick *click* bounces when the stick is moved;
@@ -154,17 +161,27 @@ worried about never had to be expressed in the state machine.
 While the keyboard is up:
 
 - the **d-pad** steps the highlight instead of emitting arrow keys;
+- the **left stick does too**, digested by the daemon into the same discrete
+  steps, and no longer drives the pointer;
 - the buttons in `[osk.bindings]` do their keyboard job;
 - **every other button keeps its desktop binding** — `SELECT` is still Esc;
-- the **sticks still drive the pointer**, which is the whole point;
+- the **right stick still scrolls**, and its bound directions still Tab;
 - the **exit button still leaves the mode**, unconditionally. It is the one
   escape that must never need thinking about.
 
 `A` commits even though it is left-click in desktop mode. Committing a
 character is by far the most frequent thing you do while typing, so it gets the
 most natural button, and `B` puts the keyboard away in one press when you want
-to click something. That trade is the one deliberate loss in "the pointer stays
-useful": you can move the cursor while typing, but clicking costs a `B` first.
+to click something.
+
+**The pointer is parked while the keyboard is up, and that is a correction
+rather than a loss.** This document used to claim the live pointer was "the
+whole point" of the layer design. That stopped being true when the v0.5
+shortcut map took `A`, `B` and `X` — every mouse button — leaving a cursor you
+could move but not click with. So the left stick was given to the grid instead,
+where it is useful. What still makes this a layer and not a mode: every button
+the keyboard does not claim keeps its desktop job, the right stick still
+scrolls, and the exit button still works.
 
 Opening `osk` from the modifier tier (`[bindings]`) **enters desktop mode with
 the keyboard already up** rather than inventing a keyboard-only state. One code
@@ -459,46 +476,107 @@ structural reason matters more than the milliseconds — auto-open (below) needs
 a process running while the keyboard is *closed*, and it cannot live in the
 daemon without dragging `gi` in against CLAUDE.md §2.
 
-## Auto-open: specified, not built
+## Auto-open, as built
 
-Opening the keyboard when you click into a text field. **Not in this change**;
-the binding-driven keyboard had to work first.
+Click into a text field and the keyboard appears; when that field goes away it
+closes again — but only if it opened itself. One you asked for stays until you
+dismiss it, because a keyboard vanishing under your hands is worse than a
+button press.
 
-The useful asset is that **we own the click** — it comes from our own virtual
-pointer — so the question is narrowly "did a text field just take focus?".
+`osk.auto_open`, on by default. One knob: closing is part of opening, not a
+separate switch.
 
-**AT-SPI is the mechanism.** Subscribe to `object:state-changed:focused`, read
-the role and states of whatever took focus (`ROLE_TEXT`, `ROLE_ENTRY`,
-`ROLE_PASSWORD_TEXT`, `STATE_EDITABLE`). Already present on this machine —
-`at-spi2-core` running, `Atspi-2.0.typelib` installed, no new package. It asks
-about the *focused* thing, which is exactly where our uinput keystrokes land,
-so the signal and the effect cannot disagree.
+### It needs accessibility switched on, and says so
 
-Two costs to measure before building: browsers and Electron apps switch into
-accessibility mode when an AT client connects, which has a real performance
-cost on the whole desktop; and coverage is per-app rather than universal.
+**Measured, and this is the first thing to check when nothing happens.** On a
+stock KDE install `org.a11y.Status IsEnabled` is **false**, and with it false
+AT-SPI lists six system helpers, none of which have windows, and **no focus
+event ever arrives no matter what you click**. Turning it on:
 
-The Wayland alternative, `zwp_input_method`, is the "correct" mechanism and
-wrong for us: it means *being* an input method, which fights typing through
-uinput, and KWin accepts only one — so we would displace fcitx5 or ibus for
-anyone running one. (For the record, this session advertises
-`zwp_text_input_manager_v3` v2 and `zwp_input_method_v1` v1.)
+```
+gsettings set org.gnome.desktop.interface toolkit-accessibility true
+```
 
-**The failure modes are lopsided, and that shapes the design.** A false
-negative costs one button press. A false positive covers the screen *and* takes
-the d-pad and face buttons away from the pointer, so a wrongly-opened keyboard
-makes the desktop harder to drive than having no keyboard at all. Auto-open
-must be conservative and opt-in.
+took the same desktop from 6 applications to 17, and Qt/QML apps immediately
+exposed their text fields — vicinae's search box, plasmashell's, and the lock
+screen's password field. Long-running Qt processes picked it up without
+restarting.
 
-Auto-*close* on focus leaving a text field is wanted, and will be tried, with
-`osk.auto_close` as the retreat if it flaps in practice. The detector should
-emit `focus_in`/`focus_out` with the role attached either way, so the retreat
-is a default change rather than a redesign.
+Because the failure mode is *silence*, `focus.unavailable_reason()` separates
+"the Atspi typelib is missing" from "accessibility is switched off" and prints
+the command. An hour went into diagnosing this by hand; nobody should have to
+do it twice.
 
-**This is the first feature in padmode that needs to know something about
-application content** rather than input and windows. CLAUDE.md §1's non-goals
-do not forbid it, but it is a category shift and belongs in the contract
-deliberately.
+Coverage is per-application, and Electron is the known gap: Chromium exposes
+nothing without `--force-renderer-accessibility`. The Claude desktop app is a
+live example — it takes `--enable-wayland-ime --wayland-text-input-version=3`
+and would work under the input-method route we rejected, and never under this
+one.
+
+### Opening: the click is what makes it safe
+
+The trigger is deliberately narrow — an editable field taking focus **within
+1.5 s of a click padmode itself synthesised**. Not any focus change: an
+application focusing its own search box at startup would otherwise open the
+keyboard, and since the keyboard parks the pointer, a wrong opening costs the
+user their cursor until they press `B`.
+
+Two mechanisms, because one is not enough:
+
+- **A subscription** to `object:state-changed:focused`, which is exact — the
+  event names the object that gained focus.
+- **A poll**, 150 ms after each click, because AT-SPI reports focus *changes*
+  and clicking a field that already has focus changes nothing. That is the
+  commonest case of all: click a field, close the keyboard, click it again.
+
+The poll must not stop at the first node claiming focus. **Measured on Kate:
+twenty nodes report `FOCUSED` simultaneously** — status-bar buttons, page tabs,
+list items inside closed dropdowns — and a depth-first search returning the
+first hit landed on a filter widget's list item and concluded you could not
+type, while the editor sat two levels up plainly marked `text`/editable. So
+every focused node is considered, and `SHOWING` weeds out the ones parked in
+hidden popups.
+
+### Closing: "focus left" is not a signal that exists
+
+The first attempt waited to be told that focus had left a text field. It never
+was. **Five focus reports in a real session, every one `editable=True`** — not
+one negative ever arrived, because clicking a blank area does not move focus
+at all, and a window vanishing sends nothing.
+
+Asking "is anything typeable focused right now" does not work either: the panel
+and the desktop have editable fields of their own, so the answer is yes
+forever.
+
+So the watcher **remembers the specific object** that caused the opening and
+checks twice a second whether it is still focused, still `SHOWING`, and not
+`DEFUNCT`. A dead widget is a definite signal, unlike the absence of an event,
+which is indistinguishable from nothing happening. That is what makes the
+common case work: type in a launcher, hit Enter, the launcher exits — and the
+keyboard goes with it.
+
+It deliberately does **not** close when you click a blank area of the same
+window. Focus really is still in the field there; typing would still land in
+it, so closing would be wrong.
+
+### The bug this combination created
+
+Auto-open lands *between* the press and the release of the very click that
+triggered it. The keyboard claims `A`, so the release arrived as a keyboard
+button and was swallowed — leaving `BTN_LEFT` held down across the entire
+desktop, unclearable even with a physical mouse, until desktop mode ended.
+
+Opening now releases whatever the pad is holding first, exactly as `_leave`
+already did on the way out, and a test pins it. Worth remembering as a shape
+rather than an incident: **anything that changes which layer owns a button must
+account for buttons that are held at that instant.**
+
+### Privacy
+
+The watcher reads roles and states, never content. It can see that a password
+field has focus — the lock screen proved that — and must never try to see more.
+That the lock screen is visible to it at all is a note for the unlock module
+(v0.7), which may turn out to be "the keyboard, at the lock screen".
 
 ## Still unmeasured
 
@@ -509,6 +587,10 @@ Everything here is honest about not having happened yet:
 - **Whether it appears over the KDE lock screen**, which would make the unlock
   module (v0.7) "the OSK, at the lock screen" rather than its own thing.
 - **Any compositor other than KWin.**
+- **Auto-open beyond Qt apps.** Verified on Kate and Vicinae. GTK4 has
+  AT-SPI built in and Firefox activates its own, but neither has been
+  tried. Electron is a known negative: no accessibility tree without
+  `--force-renderer-accessibility`.
 
 ## Manual checklist
 
@@ -526,8 +608,10 @@ here. CLAUDE.md §5: do not pretend these are automated.
       `!@#$%^^++_-)({}\\<>` all arrived correctly.
 - [x] **It spans the output** it lands on, at the configured share of screen
       height. *Verified* on both a 1536x830 and a 2560x1406 output.
-- [x] **The pointer still works** while the keyboard is up. *Verified* — the
-      whole premise of it being a layer rather than a mode.
+- [x] **The left stick drives the grid** while the keyboard is up, and the
+      pointer stays put. *Verified*, including that a hard flick steps exactly
+      one key — the spring-back overshoot rule is inherited from desktop mode
+      rather than reimplemented.
 - [x] **`SELECT` is still Escape** while the keyboard is up, and `A` is not a
       left-click until you close it with `B`. *Verified* — only the d-pad and
       the buttons in `[osk.bindings]` are taken.
@@ -559,6 +643,11 @@ here. CLAUDE.md §5: do not pretend these are automated.
       toggles layers and the toggle reads `abc` on symbols, L3 locks caps and
       the grid redraws in capitals, LB/RB move the text cursor, and repeated
       layer toggles do not resize the keyboard.
+- [x] **Auto-open and auto-close.** *Verified* on Kate and Vicinae: clicking a
+      field opens the keyboard, clicking the same field again reopens it, and
+      a launcher exiting takes the keyboard with it. A keyboard opened with `Y`
+      stays. The left mouse button is not left held afterwards — that one was a
+      real bug, found by testing, and now has a regression test.
 - [x] **Latching Ctrl/Alt/Super.** Latch `super`, commit a letter, and a global
       shortcut fires. *Verified* — Vicinae opened from the pad. Then close and
       reopen the keyboard and type: it must be a plain letter, because a latch

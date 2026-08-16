@@ -83,6 +83,10 @@ class OskClient:
         argv = [sys.executable, "-m", "padmode.osk", f"--height={self._config.height:g}"]
         if self._config.position == "top":
             argv.append("--top")
+        if self._config.auto_open:
+            # Only then does the renderer connect as an accessibility client,
+            # so a user who does not want the feature does not pay for it.
+            argv.append("--watch-focus")
 
         try:
             # bufsize=0: we read the raw fd ourselves. A buffered reader would
@@ -128,6 +132,10 @@ class OskClient:
 
     def hide(self) -> None:
         self._send(protocol.encode(protocol.HIDE))
+
+    def ask_focus(self) -> None:
+        """Ask what has focus now, for the case no focus *change* happened."""
+        self._send(protocol.encode(protocol.ASK_FOCUS))
 
     def step(self, direction: str) -> None:
         self._send(protocol.encode(protocol.STEP, dir=direction))

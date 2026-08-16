@@ -21,7 +21,7 @@ from unittest import mock
 
 from padmode import buttons
 from padmode.config import Config, ConfigError, OskConfig, parse
-from padmode.daemon import Mode, State, decide
+from padmode.daemon import Mode, State, decide, pointer_delta
 from padmode.osk import layout, protocol
 from padmode.osk.client import OskClient
 
@@ -571,6 +571,331 @@ class TestRouting(unittest.TestCase):
         decision = decide(KEY, buttons.code_of("RB"), 1, state, config)
         self.assertIs(decision.mode, Mode.DESKTOP)
         self.assertEqual([op.kind for op in decision.osk], ["open"])
+
+
+class TestTheLeftStickDrivesTheGrid(unittest.TestCase):
+    """While the keyboard is up the left stick navigates instead of pointing.
+
+    The pointer has nothing to click with by then -- the keyboard's shortcuts
+    take all three mouse buttons -- so a cursor you can move but not click was
+    worse than no cursor at all.
+    """
+
+    FULL = 32767
+
+    def setUp(self):
+        self.config = Config()
+        self.state = with_osk(self.config)
+        self.state.axis_ranges = {
+            code: (-32768, 32767)
+            for code in (buttons.ABS_X, buttons.ABS_Y,
+                         buttons.ABS_RX, buttons.ABS_RY)
+        }
+
+    def push(self, axis, fraction, now=0.0):
+        return decide(ABS, axis, int(self.FULL * fraction), self.state,
+                      self.config, now)
+
+    def test_pushing_the_stick_steps_the_grid(self):
+        decision = self.push(buttons.ABS_X, 0.9)
+        self.assertEqual([(op.kind, op.value) for op in decision.osk],
+                         [("step", "right")])
+        self.assertFalse(decision.virtual)
+
+    def test_all_four_directions(self):
+        for axis, fraction, expected in (
+            (buttons.ABS_X, 0.9, "right"), (buttons.ABS_X, -0.9, "left"),
+            (buttons.ABS_Y, 0.9, "down"), (buttons.ABS_Y, -0.9, "up"),
+        ):
+            with self.subTest(expected=expected):
+                self.setUp()
+                self.assertEqual(self.push(axis, fraction).osk[0].value, expected)
+
+    def test_the_pointer_does_not_move(self):
+        self.push(buttons.ABS_X, 0.9)
+        dx, dy, _, _ = pointer_delta(self.state, self.config, 1 / 60)
+        self.assertEqual((dx, dy), (0.0, 0.0))
+
+    def test_the_pointer_moves_again_once_the_keyboard_is_gone(self):
+        self.state.sticks[buttons.ABS_X] = 0.9
+        self.state.osk = False
+        dx, _, _, _ = pointer_delta(self.state, self.config, 1 / 60)
+        self.assertGreater(dx, 0.0)
+
+    def test_a_flick_steps_once_not_twice(self):
+        # The disarm-until-recentred rule, inherited whole from desktop mode.
+        # A stick released from full deflection rings back past centre, and
+        # without this a flick right also fires left.
+        self.assertTrue(self.push(buttons.ABS_X, 0.95, now=0.0).osk)
+        for value in (0.99, 0.8, 0.7):
+            with self.subTest(value=value):
+                self.assertFalse(self.push(buttons.ABS_X, value, now=0.01).osk)
+        # The rebound past centre must not fire the opposite direction either.
+        self.assertFalse(self.push(buttons.ABS_X, -0.8, now=0.02).osk)
+
+    def test_it_re_arms_once_the_stick_is_back_at_centre(self):
+        self.push(buttons.ABS_X, 0.95, now=0.0)
+        self.push(buttons.ABS_X, 0.0, now=1.0)      # observed near centre
+        self.assertTrue(self.push(buttons.ABS_X, 0.95, now=1.1).osk)
+
+    def test_a_diagonal_push_does_not_step_twice(self):
+        # Dominance, also inherited: a mostly-vertical push must not also trip
+        # the horizontal direction.
+        self.state.sticks[buttons.ABS_Y] = -0.95
+        decision = self.push(buttons.ABS_X, 0.65)
+        self.assertFalse(decision.osk)
+
+    def test_the_right_stick_still_scrolls(self):
+        # Scrolling is not cursor control and needs no mouse button.
+        self.state.sticks[buttons.ABS_RY] = -0.9
+        _, _, _, scroll_y = pointer_delta(self.state, self.config, 1 / 60)
+        self.assertNotEqual(scroll_y, 0.0)
+
+    def test_a_bound_right_stick_direction_still_does_its_desktop_job(self):
+        # RS_RIGHT is Tab in the defaults, and tabbing between fields while
+        # typing is useful, so the keyboard leaves it alone.
+        decision = self.push(buttons.ABS_RX, 0.9)
+        self.assertFalse(decision.osk)
+        self.assertTrue(decision.virtual)
+
+
+class _Reader:
+    def __init__(self):
+        self.axis_ranges = {}
+        self.trigger_axes = {}
+        self.grabbed = False
+
+    def grab(self):
+        self.grabbed = True
+
+    def ungrab(self):
+        self.grabbed = False
+
+    def set_tick(self, interval):
+        pass
+
+
+class _Runner:
+    def preflight(self, bindings):
+        pass
+
+    def run(self, binding):
+        pass
+
+
+class _Virtual:
+    def __init__(self):
+        self.clicks = []
+        self.held = set()
+
+    def open(self):
+        return True
+
+    def click(self, code, pressed):
+        self.clicks.append((code, pressed))
+        if pressed:
+            self.held.add(code)
+        else:
+            self.held.discard(code)
+
+    def key(self, code, pressed):
+        pass
+
+    def tap_keys(self, codes):
+        pass
+
+    def release_all(self):
+        # The real one clears everything it is holding; a fake that did not
+        # would hide exactly the bug these tests exist for.
+        self.held.clear()
+
+    def close(self):
+        pass
+
+
+class _Osk:
+    """Stands in for the renderer process."""
+
+    def __init__(self):
+        self.shown = 0
+        self.hidden = 0
+        self.asked = 0
+        self.alive = True
+
+    def ask_focus(self):
+        self.asked += 1
+
+    def start(self):
+        return True
+
+    def stop(self):
+        self.alive = False
+
+    def show(self, hints):
+        self.shown += 1
+
+    def hide(self):
+        self.hidden += 1
+
+    def poll(self):
+        return []
+
+
+class TestAutoOpen(unittest.TestCase):
+    """Opening is deliberately hard; closing is deliberately narrow."""
+
+    def daemon(self, **osk_overrides):
+        from padmode.daemon import Daemon
+
+        table = {"osk": osk_overrides} if osk_overrides else {}
+        config = parse(table)
+        self.osk = _Osk()
+        self.virtual = _Virtual()
+        daemon = Daemon(config, _Reader(), _Runner(), self.virtual, None, self.osk)
+        daemon.state.mode = Mode.DESKTOP
+        return daemon
+
+    def click(self, daemon):
+        """What the daemon does when the pad presses the left mouse button."""
+        from padmode.daemon import VirtualOp
+
+        daemon._apply(VirtualOp("click", (buttons.CLICKS["LEFT"],), pressed=True))
+
+    def test_a_text_field_after_our_click_opens_it(self):
+        daemon = self.daemon()
+        self.click(daemon)
+        daemon._focus_changed(True)
+        self.assertTrue(daemon.state.osk)
+        self.assertEqual(self.osk.shown, 1)
+
+    def test_a_text_field_with_no_click_of_ours_does_not(self):
+        # An application focusing its own search box at startup. Opening then
+        # would cost the pointer for a keyboard nobody asked for.
+        daemon = self.daemon()
+        daemon._focus_changed(True)
+        self.assertFalse(daemon.state.osk)
+        self.assertEqual(self.osk.shown, 0)
+
+    def test_the_click_window_expires(self):
+        daemon = self.daemon()
+        self.click(daemon)
+        daemon._clicked_at -= 60.0  # a minute ago, not just now
+        daemon._focus_changed(True)
+        self.assertFalse(daemon.state.osk)
+
+    def test_leaving_a_text_field_closes_what_opened_itself(self):
+        daemon = self.daemon()
+        self.click(daemon)
+        daemon._focus_changed(True)
+        daemon._focus_changed(False)
+        self.assertFalse(daemon.state.osk)
+        self.assertEqual(self.osk.hidden, 1)
+
+    def test_it_does_not_close_one_you_asked_for(self):
+        # The whole point of tracking how it opened: a keyboard you summoned
+        # should not vanish because focus wandered.
+        daemon = self.daemon()
+        daemon._open_osk()               # as the Y button does
+        daemon._focus_changed(False)
+        self.assertTrue(daemon.state.osk)
+        self.assertEqual(self.osk.hidden, 0)
+
+    def test_a_manual_open_stays_manual_even_after_a_text_field(self):
+        daemon = self.daemon()
+        daemon._open_osk()
+        self.click(daemon)
+        daemon._focus_changed(True)      # already open: changes nothing
+        daemon._focus_changed(False)
+        self.assertTrue(daemon.state.osk)
+
+    def test_disabled_means_nothing_happens(self):
+        daemon = self.daemon(auto_open=False)
+        self.click(daemon)
+        daemon._focus_changed(True)
+        self.assertFalse(daemon.state.osk)
+
+    def test_nothing_happens_outside_a_pad_mode(self):
+        daemon = self.daemon()
+        daemon.state.mode = Mode.IDLE
+        self.click(daemon)
+        daemon._focus_changed(True)
+        self.assertFalse(daemon.state.osk)
+
+    def test_opening_does_not_leave_the_mouse_button_held(self):
+        # Auto-open lands *between* the press and the release of the very click
+        # that caused it. The keyboard claims A, so the release is swallowed as
+        # a keyboard button -- and BTN_LEFT stays down across the whole
+        # desktop, which not even a physical mouse can clear.
+        daemon = self.daemon()
+        self.click(daemon)
+        self.assertIn(buttons.CLICKS["LEFT"], self.virtual.held)
+        daemon._focus_changed(True)
+        self.assertEqual(self.virtual.held, set(),
+                         "the keyboard opened holding a mouse button down")
+
+    def test_opening_drops_a_debounced_release_still_in_flight(self):
+        # Same hazard by a different route: a release held back for debounce
+        # would fire after the keyboard took the button over.
+        daemon = self.daemon()
+        self.click(daemon)
+        daemon.state.pending_release["A"] = ("whatever", 0.0)
+        daemon._focus_changed(True)
+        self.assertEqual(daemon.state.pending_release, {})
+
+    def test_a_click_schedules_a_look_at_what_has_focus(self):
+        # Clicking a field that already had focus raises no AT-SPI event at
+        # all, and that is the ordinary case of clicking back into the field
+        # you were just typing in. So the click asks, rather than waiting.
+        daemon = self.daemon()
+        self.click(daemon)
+        self.assertIsNotNone(daemon._focus_check_at)
+        daemon._focus_check_at = 0.0        # due
+        daemon._pump_osk()
+        self.assertEqual(self.osk.asked, 1)
+        self.assertIsNone(daemon._focus_check_at, "asked more than once")
+
+    def test_an_automatic_open_keeps_watching_the_field(self):
+        # There is no "focus left" event -- measured, AT-SPI never sends one --
+        # so the only way to notice the field going away is to keep asking.
+        daemon = self.daemon()
+        self.click(daemon)
+        daemon._focus_changed(True)
+        self.assertIsNotNone(daemon._focus_check_at)
+        daemon._focus_check_at = 0.0
+        daemon._pump_osk()
+        self.assertEqual(self.osk.asked, 1)
+        self.assertIsNotNone(daemon._focus_check_at, "stopped watching after one look")
+
+    def test_a_manual_open_is_not_watched(self):
+        daemon = self.daemon()
+        daemon._open_osk()
+        self.assertIsNone(daemon._focus_check_at)
+
+    def test_the_watch_stops_once_it_closes(self):
+        daemon = self.daemon()
+        self.click(daemon)
+        daemon._focus_changed(True)
+        daemon._focus_changed(False)          # the field went away
+        self.assertFalse(daemon.state.osk)
+        self.assertIsNone(daemon._focus_check_at)
+
+    def test_it_does_not_ask_while_the_keyboard_is_already_up(self):
+        daemon = self.daemon()
+        daemon._open_osk()
+        self.click(daemon)
+        self.assertIsNone(daemon._focus_check_at)
+
+    def test_it_does_not_ask_when_auto_open_is_off(self):
+        daemon = self.daemon(auto_open=False)
+        self.click(daemon)
+        self.assertIsNone(daemon._focus_check_at)
+
+    def test_closing_it_by_hand_clears_the_automatic_flag(self):
+        daemon = self.daemon()
+        self.click(daemon)
+        daemon._focus_changed(True)
+        daemon._close_osk()
+        self.assertFalse(daemon._osk_auto)
 
 
 class TestConfig(unittest.TestCase):

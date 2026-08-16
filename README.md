@@ -73,6 +73,8 @@ startup and disables only the overlay buttons.
 - Optional, for overlays only: `kdotool` on KDE Wayland, `xdotool` on X11
 - Optional, for the on-screen keyboard only: `gtk4-layer-shell` and PyGObject
   (`gtk4-layer-shell python-gobject` on Arch). Wayland sessions only
+- Optional, for the keyboard opening itself: `at-spi2-core`, plus desktop
+  accessibility switched on (see below)
 
 Missing optional tools disable only the bindings that need them. No
 `playerctl`? Volume control still works, and padmode says so once at startup
@@ -168,7 +170,8 @@ sit beside the space bar.
 | RT | Symbols / letters |
 | L3 | Caps lock |
 | Start | Enter |
-| **Left stick** | Still moves the pointer |
+| **Left stick** | Move around the grid — the pointer stays put |
+| Right stick | Still scrolls, and still Tabs |
 
 **Every shortcut is printed on the key it belongs to**, the way a console
 keyboard does it — a yellow Y on the space bar, a blue X on Backspace, `RT` on
@@ -189,8 +192,11 @@ with a modifier stuck down.
 launcher. That's a real key press and release, and a hardware keyboard does the
 same thing.)
 
-It is a *layer*, not a mode: the sticks keep driving the pointer while you
-type, and any button the keyboard does not use keeps its desktop job. Shift
+It is a *layer*, not a mode: any button the keyboard does not use keeps its
+desktop job, the right stick still scrolls, and the exit button still works.
+The **left stick moves around the grid** while it is up, and the pointer stays
+put — the keyboard's own shortcuts take all three mouse buttons, so a cursor
+you could move but not click with was worth less than a second d-pad. Shift
 applies to one letter, or locks if you press it twice. The keyboard never takes
 keyboard focus, so it types into whatever you were pointing at — including
 password fields, since the keystrokes are ordinary virtual-hardware input and
@@ -200,6 +206,21 @@ never costs you part of the screen.
 
 Set `height` to how much of the screen you want it to take. It sizes itself to
 whichever monitor it appears on, and follows you if you move to another one.
+
+**It opens by itself when you click into a text field**, and closes again when
+that field goes away — but only if it opened itself. One you opened with `Y`
+stays until you dismiss it. This needs desktop accessibility switched on, which
+on a stock KDE install it is not:
+
+```bash
+gsettings set org.gnome.desktop.interface toolkit-accessibility true
+```
+
+Without it nothing reports its text fields and nothing happens; padmode says so
+once at startup rather than leaving you guessing. Coverage is per-application:
+Qt and GTK apps work, and Electron apps expose nothing unless launched with
+`--force-renderer-accessibility`. Turn the whole thing off with
+`auto_open = false`.
 
 `A` commits rather than left-clicking while the keyboard is up, because
 committing a character is what you are mostly doing. Press `B` first if you
@@ -392,6 +413,8 @@ position = "bottom"    # or "top". It never reserves space, so it covers
                        # rather than pushes windows around
 height = 30            # percent of screen height; the width scales to match,
                        # so it looks the same on a laptop panel and a TV
+auto_open = true       # open when you click into a text field, and close when
+                       # that field goes away. Needs desktop accessibility on
 # preload = "/usr/lib/libgtk4-layer-shell.so"   # only if autodetection fails
 
 [osk.bindings]         # what the pad does while the keyboard is up.

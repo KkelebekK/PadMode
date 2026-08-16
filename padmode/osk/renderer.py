@@ -116,6 +116,8 @@ class Renderer:
 
     def __init__(self, position: str = "bottom", height_pct: float = 30.0) -> None:
         self.keyboard = layout.Keyboard()
+        #: Focus watcher, when auto-open is on. Set by :func:`main`.
+        self.watcher = None
         self.hints: dict[str, str] = {}
         self._cells: list[list[Gtk.Widget]] = []
         self._buffer = b""
@@ -447,6 +449,21 @@ class Renderer:
         if kind == protocol.HIDE:
             self._put_away()
             return
+        if kind == protocol.ASK_FOCUS:
+            if self.watcher is not None:
+                # Two different questions, and which one to answer depends on
+                # whether we are already up. Closed: "is there something to
+                # type into?" Open: "is the field we opened for still there?"
+                # The second cannot be asked as the first -- the panel and the
+                # desktop have editable fields of their own, so "anything
+                # typeable anywhere" is answered yes forever.
+                editable = (
+                    self.watcher.field_still_focused()
+                    if self.window.get_visible()
+                    else self.watcher.current_editable()
+                )
+                write(protocol.encode(protocol.FOCUS, editable=editable))
+            return
         if kind == protocol.STEP:
             direction = fields.get("dir")
             if isinstance(direction, str):
@@ -581,6 +598,29 @@ def main(argv: list[str] | None = None) -> int:
     GLib.unix_fd_add_full(
         GLib.PRIORITY_DEFAULT, sys.stdin.fileno(), GLib.IOCondition.IN, on_stdin
     )
+
+    # Imported only when asked for, so a session without the Atspi typelib is
+    # not even slightly affected by the feature existing.
+    watcher = None
+    if "--watch-focus" in argv:
+        from .focus import FocusWatcher
+
+        watcher = FocusWatcher(
+            lambda editable: write(
+                protocol.encode(protocol.FOCUS, editable=editable)
+            )
+        )
+        reason = watcher.start()
+        if reason is not None:
+            # Say it rather than fail: the keyboard still works by hand, and
+            # the whole failure mode here is silence, which is maddening to
+            # diagnose from the outside.
+            _log(f"auto-open unavailable: {reason}")
+            watcher = None
+        renderer.watcher = watcher
+
     write(protocol.encode(protocol.READY))
     loop.run()
+    if watcher is not None:
+        watcher.stop()
     return 0

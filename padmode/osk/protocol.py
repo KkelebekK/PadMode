@@ -31,6 +31,11 @@ STEP = "step"
 #: A semantic action: ``name`` is one of :data:`ACTIONS`. The daemon resolves
 #: buttons to actions so the mapping stays in config, where it is bindable.
 ACT = "act"
+#: Report what has focus right now, as a :data:`FOCUS` message. Sent shortly
+#: after a click of ours, because AT-SPI reports focus *changes* only: clicking
+#: a field that already had focus raises no event at all, and that is the
+#: ordinary case of clicking back into the field you were just typing in.
+ASK_FOCUS = "ask_focus"
 
 # -- renderer -> daemon ------------------------------------------------
 #: The renderer is up and layer-shell worked. Sent once, before anything is
@@ -50,6 +55,11 @@ HOLD = "hold"
 CLOSED = "closed"
 #: The renderer cannot run. ``reason`` says why, once, in plain words.
 FAILED = "failed"
+#: Something took keyboard focus: ``editable`` says whether you could type into
+#: it. Only ever a role and a state -- never what the field contains. The
+#: daemon decides what to do with it, because it owns the flag that routes the
+#: pad's buttons and the two must not disagree about who has them.
+FOCUS = "focus"
 
 #: Actions a button can be forwarded as. The renderer decides what each does
 #: to its own grid; the daemon only knows the names.

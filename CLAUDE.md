@@ -12,15 +12,17 @@ product names in the shipped tool, package, or docs.
 **Status: v0.5.0** (Guide-hold media/volume/mic; uinput virtual
 mouse/keyboard; desktop mode with bindable stick directions; window backends
 and overlay mode with return-to-game; frontend integration and the Heroic
-metadata generator; on-screen keyboard; 438 tests). This document is the
+metadata generator; on-screen keyboard with auto-open; 482 tests). This document is the
 contract. If something here is wrong, fix this file in the same change as the
 code.
 
 The keyboard is finished and its manual checklist is complete: it types, spans
-and follows the active output, draws over a fullscreen game, and survives its
-renderer being killed. The round trip the ownership split costs is ~1 ms. What
-is not established is breadth — one game, one compositor, one pad — which is
-what `docs/on-screen-keyboard.md` §Still unmeasured now lists.
+and follows the active output, draws over a fullscreen game, survives its
+renderer being killed, and opens itself when you click into a text field. The
+round trip the ownership split costs is ~1 ms. What is not established is
+breadth — one game, one compositor, one pad, and auto-open tried only against
+Qt applications — which is what `docs/on-screen-keyboard.md` §Still unmeasured
+now lists.
 
 ---
 
@@ -38,6 +40,17 @@ is no longer a second implementation to consult or stay compatible with.
 - Not a game frontend. We integrate with frontends; we don't ship one.
 - Not a general-purpose input remapper. We do specific modes, not arbitrary
   device remapping. That's input-remapper's and AntiMicroX's job.
+- Not an accessibility tool. We *read* AT-SPI to notice when a text field has
+  focus, so the keyboard can open itself; we never expose padmode's own
+  interface to assistive technology, and we read roles and states only, never
+  content.
+
+**One deliberate widening:** auto-open is the first feature that needs to know
+something about *application content* rather than input and windows. It is
+opt-outable, it degrades to nothing when accessibility is switched off, and it
+buys the single behaviour that makes the keyboard feel finished. Anything
+further in that direction should be argued for on its own, not waved through as
+precedent.
 
 ---
 
@@ -99,10 +112,18 @@ on the grounds that it would need to be *concurrent* with another mode — the
 pointer stays useful while typing — which the state machine had never had to
 express. Building it showed the concurrency never needed expressing: `osk` is a
 **flag on the state**, valid only while the mode is in `PAD_MODES`. While it is
-set the d-pad and the buttons in `[osk.bindings]` belong to the keyboard, every
-other button keeps its desktop binding, and the sticks are untouched. One
-boolean and one routing rule, instead of a fifth mode that would have been 90%
-a copy of desktop. See `docs/on-screen-keyboard.md`.
+set the d-pad and the buttons in `[osk.bindings]` belong to the keyboard, and
+every other button keeps its desktop binding. One boolean and one routing rule,
+instead of a fifth mode that would have been 90% a copy of desktop. See
+`docs/on-screen-keyboard.md`.
+
+The **left stick drives the grid** while it is up, and the pointer is parked.
+This reverses "the sticks are untouched", written when the keyboard first
+landed: the shortcut map had by then taken `A`, `B` and `X` — every mouse
+button — so the pointer could be moved but not clicked with, and giving the
+stick to the grid was a correction rather than a loss. The right stick still
+scrolls and still tabs. The digestion lives in the daemon, so the renderer only
+ever receives the discrete steps a d-pad produces.
 
 ### 3.2 Two things the old setup did that we delete on day one
 

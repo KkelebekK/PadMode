@@ -46,6 +46,25 @@ SETTLE_TICK = 0.05
 #: chatters out presses and releases without moving.
 TRIGGER_HYSTERESIS = 0.15
 
+#: How soon after a click of ours a focus change still counts as caused by it.
+#: The narrow trigger: an application focusing its own search box at startup,
+#: or a dialog appearing, must not open the keyboard -- doing so would cost the
+#: user the pointer, since the keyboard parks it.
+AUTO_OPEN_AFTER_CLICK = 1.5
+
+#: How long after a click to ask what has focus. Long enough for the
+#: application to have processed the click, short enough not to feel laggy.
+#: The ask is needed because AT-SPI only reports focus *changes*, so clicking
+#: the field you are already in raises no event at all.
+FOCUS_CHECK_DELAY = 0.15
+
+#: How often to check that the field we opened for is still there, while the
+#: keyboard is up because of it. A poll rather than an event because there is
+#: no event: measured, AT-SPI never once reported focus *leaving* a text field
+#: -- clicking a blank area does not move focus, and a window vanishing sends
+#: nothing at all.
+FIELD_CHECK_INTERVAL = 0.5
+
 #: How often we look for the window of an app we just launched. Each look is
 #: one short-lived process, so this trades a little latency for staying well
 #: clear of spawning one 60 times a second.
@@ -358,6 +377,18 @@ def _decide_desktop(
             lo, hi = state.axis_ranges.get(ev_code, buttons.DEFAULT_AXIS_RANGE)
             value = buttons.normalize_axis(ev_value, lo, hi)
             state.sticks[ev_code] = value
+            if state.osk and ev_code in OSK_STICK_AXES:
+                # Same digestion as any bound direction -- threshold, dominance
+                # and the disarm-until-recentred rule -- so the renderer gets
+                # the same discrete steps the d-pad produces and never has to
+                # learn what a dead zone is.
+                name = _stick_step(
+                    ev_code, value, state, desktop, now,
+                    lambda n: n in _OSK_STICK_STEPS,
+                )
+                if name is None:
+                    return NOTHING
+                return Decision(osk=(OskOp("step", _OSK_STICK_STEPS[name]),))
             ops = _stick_direction_ops(ev_code, value, state, desktop, now)
             return Decision(virtual=ops) if ops else NOTHING
 
@@ -428,6 +459,21 @@ _OSK_STEPS = {
     "DPAD_RIGHT": "right",
 }
 
+#: Left-stick directions move the highlight too, while the keyboard is up. The
+#: pointer has nothing to click with by then -- the keyboard's own shortcuts
+#: take all three mouse buttons -- so the stick is better spent on the grid.
+_OSK_STICK_STEPS = {
+    "LS_UP": "up",
+    "LS_DOWN": "down",
+    "LS_LEFT": "left",
+    "LS_RIGHT": "right",
+}
+
+#: The axes that obey the above. The right stick is deliberately untouched: it
+#: still scrolls, and its bound directions still tab between fields. Scrolling
+#: is not cursor control, and neither needs a mouse button.
+OSK_STICK_AXES = frozenset({buttons.ABS_X, buttons.ABS_Y})
+
 
 def _decide_osk(
     ev_type: int,
@@ -482,10 +528,20 @@ def pending_release_ops(state: State, now: float) -> tuple[VirtualOp, ...]:
     return tuple(state.pending_release.pop(name)[0] for name in due)
 
 
-def _stick_direction_ops(
-    ev_code: int, value: float, state: State, desktop, now: float
-) -> tuple[VirtualOp, ...]:
-    """Turn a stick crossing its threshold into one discrete step.
+def _stick_step(
+    ev_code: int,
+    value: float,
+    state: State,
+    desktop,
+    now: float,
+    wanted,
+) -> str | None:
+    """The stick direction that just fired, or None. All the hard-won bits.
+
+    ``wanted`` says whether a direction means anything to the caller. It gates
+    the *side effects* as well as the answer: an axis must not disarm itself
+    for a direction that was going to be ignored, or an unbound push would
+    swallow the next real one.
 
     A stick is not a button: it has no detent, and it springs back hard enough
     to overshoot. Three things follow, and all three were found by using it.
@@ -512,14 +568,14 @@ def _stick_direction_ops(
     """
     pair = buttons.directions_on_axis(ev_code)
     if pair is None:
-        return ()
+        return None
     engage = desktop.stick_threshold
     rearm = max(desktop.dead_zone, engage * 0.35)
 
     if ev_code in state.axis_disarmed:
         if now >= state.axis_settle.get(ev_code, 0.0) and abs(value) < rearm:
             state.axis_disarmed.discard(ev_code)
-        return ()
+        return None
 
     # Only the dominant axis of a stick acts, so a mostly-vertical push cannot
     # also trip a horizontal step. This is the mirror of the suppression in
@@ -528,20 +584,35 @@ def _stick_direction_ops(
     if sibling is not None and not _dominates(
         state, ev_code, sibling, desktop.stick_dominance
     ):
-        return ()
+        return None
 
     for name, sign in ((pair[0], -1), (pair[1], 1)):
         if value * sign < engage:
             continue
-        op = _op_for(desktop.bindings.get(name), pressed=True)
-        if op is None:
+        if not wanted(name):
             continue
         state.axis_disarmed.add(ev_code)
         state.axis_settle[ev_code] = now + desktop.stick_settle
-        if op.kind == "tap":
-            return (op,)  # a combination is already a complete tap
-        return (op, VirtualOp(op.kind, op.codes, pressed=False))
-    return ()
+        return name
+    return None
+
+
+def _stick_direction_ops(
+    ev_code: int, value: float, state: State, desktop, now: float
+) -> tuple[VirtualOp, ...]:
+    """A bound stick direction, as a tap on the virtual keyboard."""
+    def bound(name: str) -> bool:
+        return _op_for(desktop.bindings.get(name), pressed=True) is not None
+
+    name = _stick_step(ev_code, value, state, desktop, now, bound)
+    if name is None:
+        return ()
+    op = _op_for(desktop.bindings.get(name), pressed=True)
+    if op is None:  # unreachable: `bound` already checked
+        return ()
+    if op.kind == "tap":
+        return (op,)  # a combination is already a complete tap
+    return (op, VirtualOp(op.kind, op.codes, pressed=False))
 
 
 def stick_tick_ops(state: State, desktop, now: float) -> tuple[VirtualOp, ...]:
@@ -597,9 +668,15 @@ def pointer_delta(
 
     Stick axes are negative upwards, and so are ``REL_Y`` and an upward scroll,
     so no axis needs inverting.
+
+    While the on-screen keyboard is up the left stick is treated as claimed:
+    it is driving the grid instead, and there is nothing left to click with
+    anyway. The wheel is untouched -- scrolling needs no mouse button.
     """
     desktop = config.desktop
     claimed = claimed_axes(desktop)
+    if state.osk:
+        claimed = claimed | OSK_STICK_AXES
 
     def axis(code: int) -> float:
         # An axis bound to a key direction has given up its analogue job.
@@ -694,6 +771,18 @@ class Daemon:
         #: same convention as ``virtual`` and ``windows``: absent means the one
         #: feature is off, never that anything fails.
         self._osk = osk
+        #: Whether the keyboard now on screen opened itself. Only an automatic
+        #: opening closes automatically: one you asked for stays until you
+        #: dismiss it, because having it vanish under you would be worse than
+        #: having to press a button.
+        self._osk_auto = False
+        #: When we last synthesised a click. Auto-open needs it: "we own the
+        #: click" is what separates *you* entering a field from an application
+        #: focusing one on its own.
+        self._clicked_at = 0.0
+        #: When to ask the renderer what has focus, after a click. None when
+        #: nothing is outstanding.
+        self._focus_check_at: float | None = None
         #: When we last asked the keyboard to do something, so the round trip
         #: can be reported rather than guessed at. The renderer owning
         #: selection costs a trip per keypress (docs/on-screen-keyboard.md);
@@ -845,6 +934,13 @@ class Daemon:
         if self._virtual is None:
             return
         if op.kind == "click":
+            if op.pressed:
+                # Remembered for auto-open. This is the "we own the click"
+                # asset: the only way to tell you entering a field apart from
+                # an application focusing one by itself.
+                self._clicked_at = time.monotonic()
+                if self._config.osk.auto_open and not self._state.osk:
+                    self._focus_check_at = self._clicked_at + FOCUS_CHECK_DELAY
             self._virtual.click(op.codes[0], op.pressed)
         elif op.kind == "key":
             self._virtual.key(op.codes[0], op.pressed)
@@ -899,6 +995,8 @@ class Daemon:
 
     def _stop_osk(self) -> None:
         self._state.osk = False
+        self._osk_auto = False
+        self._focus_check_at = None
         self._release_osk_mods()
         if self._osk is not None:
             self._osk.stop()
@@ -930,7 +1028,7 @@ class Daemon:
             self._osk_sent_at = time.monotonic()
             self._osk.act(op.value)
 
-    def _open_osk(self) -> None:
+    def _open_osk(self, auto: bool = False) -> None:
         if self._state.osk:
             return
         if self._osk is None or not self._osk.start():
@@ -938,14 +1036,59 @@ class Daemon:
             return
         self._osk.show(self._osk_hints())
         self._state.osk = True
+        self._osk_auto = auto
+        # Start watching the field that caused this, so we notice it going
+        # away. Only for an automatic opening: one you asked for stays.
+        self._focus_check_at = (
+            time.monotonic() + FIELD_CHECK_INTERVAL if auto else None
+        )
+        # Let go of whatever the pad is holding, before the keyboard takes the
+        # buttons over. Opening lands *between* the press and the release of
+        # the very click that triggered it, and the keyboard claims A -- so the
+        # release arrives as a keyboard button and is swallowed, leaving
+        # BTN_LEFT down across the entire desktop. Nothing short of leaving the
+        # mode clears that, not even a physical mouse. The same reasoning as
+        # the release in `_leave`, for the same reason.
+        if self._virtual is not None:
+            self._virtual.release_all()
+        self._state.pending_release.clear()
 
     def _close_osk(self) -> None:
         self._state.osk = False
+        self._osk_auto = False
+        self._focus_check_at = None
         if self._osk is not None:
             self._osk.hide()
         # After the hide: the renderer sends its own releases in response, and
         # this catches whatever it did not.
         self._release_osk_mods()
+
+    def _focus_changed(self, editable: bool) -> None:
+        """Open or close the keyboard as focus moves between text fields.
+
+        Opening is deliberately hard and closing deliberately easy, because the
+        two failures are not symmetrical: a keyboard that fails to appear costs
+        one button press, while one that appears uninvited covers the screen
+        *and* parks the pointer, leaving the user worse off than with no
+        keyboard at all.
+        """
+        log.debug(
+            "focus: editable=%s osk=%s auto=%s since_click=%.2fs",
+            editable, self._state.osk, self._osk_auto,
+            time.monotonic() - self._clicked_at,
+        )
+        if not self._config.osk.auto_open or self._state.mode not in PAD_MODES:
+            return
+        if editable:
+            if self._state.osk:
+                return
+            if time.monotonic() - self._clicked_at > AUTO_OPEN_AFTER_CLICK:
+                # Focus moved for some other reason: an application starting,
+                # a dialog opening, a window closing. Not our business.
+                return
+            self._open_osk(auto=True)
+        elif self._state.osk and self._osk_auto:
+            self._close_osk()
 
     def _osk_hints(self) -> dict[str, str]:
         """Action -> the button bound to it, so the keyboard can label itself.
@@ -962,6 +1105,18 @@ class Daemon:
         """Act on whatever the renderer said, and notice if it died."""
         if self._osk is None:
             return
+        if self._focus_check_at is not None and (
+            time.monotonic() >= self._focus_check_at
+        ):
+            self._osk.ask_focus()
+            # Keep asking while the keyboard is up because of a field: that is
+            # the only way to notice the field going away. Once it is closed,
+            # or was opened by hand, there is nothing to watch.
+            self._focus_check_at = (
+                time.monotonic() + FIELD_CHECK_INTERVAL
+                if self._state.osk and self._osk_auto
+                else None
+            )
         for kind, fields in self._osk.poll():
             self._handle_osk(kind, fields)
         if self._state.osk and not self._osk.alive:
@@ -1011,8 +1166,11 @@ class Daemon:
                     self._osk_held.add(code)
                 else:
                     self._osk_held.discard(code)
+        elif kind == osk_protocol.FOCUS:
+            self._focus_changed(bool(fields.get("editable")))
         elif kind == osk_protocol.CLOSED:
             self._state.osk = False
+            self._osk_auto = False
             self._release_osk_mods()
         elif kind == osk_protocol.FAILED:
             log.warning("on-screen keyboard: %s", fields.get("reason", "unavailable"))

@@ -142,6 +142,15 @@ class OskConfig:
     #: rather than exact -- getting it to the pixel would cost a second layout
     #: pass for no benefit.
     height: float = 30.0
+    #: Open the keyboard by itself when you click into a text field, and close
+    #: it again when focus leaves one -- but only when it opened itself. A
+    #: keyboard you asked for stays until you dismiss it.
+    #:
+    #: Needs desktop accessibility switched on (``gsettings set
+    #: org.gnome.desktop.interface toolkit-accessibility true``); without it no
+    #: application reports its text fields and nothing happens. padmode says so
+    #: once at startup rather than leaving you guessing.
+    auto_open: bool = True
     #: Path or soname to preload so gtk4-layer-shell can hook GDK. Empty means
     #: autodetect (:func:`padmode.osk.preload_library`); set it only if the
     #: library lives somewhere we do not look.
@@ -506,14 +515,18 @@ def _reject_unknown(table: dict[str, Any], known: set[str], section: str) -> Non
 def _parse_osk(table: dict[str, Any]) -> OskConfig:
     """Parse ``[osk]``. Absent is fine; the keyboard is on by default."""
     _reject_unknown(
-        table, {"enabled", "position", "height", "preload", "bindings"}, "osk"
+        table,
+        {"enabled", "position", "height", "auto_open", "preload", "bindings"},
+        "osk",
     )
     osk = OskConfig()
 
-    if "enabled" in table:
-        if not isinstance(table["enabled"], bool):
-            raise ConfigError("osk.enabled must be true or false")
-        osk = replace(osk, enabled=table["enabled"])
+    for key in ("enabled", "auto_open"):
+        if key not in table:
+            continue
+        if not isinstance(table[key], bool):
+            raise ConfigError(f"osk.{key} must be true or false")
+        osk = replace(osk, **{key: table[key]})
 
     if "position" in table:
         position = table["position"]
