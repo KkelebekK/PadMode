@@ -9,17 +9,18 @@ screen with the pad.
 `WeHaveSteamMachineAtHome` (a joke); do not use "Steam Machine" or other Valve
 product names in the shipped tool, package, or docs.
 
-**Status: v0.5.0-dev** (Guide-hold media/volume/mic; uinput virtual
+**Status: v0.5.0** (Guide-hold media/volume/mic; uinput virtual
 mouse/keyboard; desktop mode with bindable stick directions; window backends
 and overlay mode with return-to-game; frontend integration and the Heroic
-metadata generator; on-screen keyboard; 404 tests). This document is the
+metadata generator; on-screen keyboard; 438 tests). This document is the
 contract. If something here is wrong, fix this file in the same change as the
 code.
 
-The keyboard works from a real gamepad on Plasma 6.7 — it types, spans the
-output, and follows the active monitor. Not yet checked: over a fullscreen
-game, round-trip latency, and a dying renderer seen from the user's seat. The
-unticked boxes in `docs/on-screen-keyboard.md` are the list.
+The keyboard is finished and its manual checklist is complete: it types, spans
+and follows the active output, draws over a fullscreen game, and survives its
+renderer being killed. The round trip the ownership split costs is ~1 ms. What
+is not established is breadth — one game, one compositor, one pad — which is
+what `docs/on-screen-keyboard.md` §Still unmeasured now lists.
 
 ---
 
@@ -67,6 +68,14 @@ is no longer a second implementation to consult or stay compatible with.
   (the `input` group) and write on `/dev/uinput` (a shipped udev rule). **Never
   runs as root.**
 - **No input-remapper.** We create our own uinput virtual device (see §3.2).
+- **Analogue triggers are translated into buttons** before `decide()` sees
+  them, so `LT`/`RT` work anywhere a button works — modifier, `desktop.enter`,
+  any bindings table — with no downstream branch knowing they came from an
+  axis. Most pads report the triggers only as `ABS_Z`/`ABS_RZ` and never emit
+  `BTN_TL2`/`BTN_TR2`, which made them silently unbindable until v0.5. A pad
+  that reports *both* is left alone, or every press would fire twice; the
+  reader decides which from the device's capabilities. Confirmed on a real
+  analogue-trigger pad, not only against a synthetic one.
 
 ---
 

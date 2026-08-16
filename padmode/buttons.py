@@ -28,8 +28,22 @@ ABS_X = 0x00      # 0  -- left stick horizontal
 ABS_Y = 0x01      # 1  -- left stick vertical
 ABS_RX = 0x03     # 3  -- right stick horizontal
 ABS_RY = 0x04     # 4  -- right stick vertical
+ABS_Z = 0x02      # 2  -- left trigger, on the standard gamepad mapping
+ABS_RZ = 0x05     # 5  -- right trigger
 ABS_HAT0X = 0x10  # 16 -- d-pad horizontal, -1 left / +1 right
 ABS_HAT0Y = 0x11  # 17 -- d-pad vertical,   -1 up   / +1 down
+
+#: Analogue trigger axis -> the button it stands in for. Most pads report the
+#: triggers as these axes and never emit ``BTN_TL2``/``BTN_TR2`` at all, which
+#: is why binding ``LT`` did nothing on almost every real controller until this
+#: existed. Whether a given device actually needs the translation is decided by
+#: :attr:`padmode.input.reader.GamepadReader.trigger_axes`, from its
+#: capabilities -- a pad that reports both would otherwise fire twice.
+TRIGGERS: dict[int, str] = {ABS_Z: "LT", ABS_RZ: "RT"}
+
+#: What a trigger reports when it is not being touched, if it advertises no
+#: range of its own. Triggers rest at their minimum rather than centred.
+DEFAULT_TRIGGER_RANGE = (0, 255)
 
 #: Analogue stick axis name -> absolute axis code. Unlike the d-pad, these are
 #: continuous: they report a *position*, which desktop mode integrates into
@@ -104,6 +118,18 @@ def normalize_axis(value: int, lo: int, hi: int) -> float:
     centre = (lo + hi) / 2
     half = (hi - lo) / 2
     return max(-1.0, min(1.0, (value - centre) / half))
+
+
+def normalize_trigger(value: int, lo: int, hi: int) -> float:
+    """Scale a trigger reading to 0.0..1.0.
+
+    Not :func:`normalize_axis`: a trigger rests at its *minimum*, not its
+    centre, so centring one would read as fully deflected in the negative
+    direction when it is simply not being pressed.
+    """
+    if hi <= lo:
+        return 0.0
+    return max(0.0, min(1.0, (value - lo) / (hi - lo)))
 
 #: Canonical button name -> EV_KEY code.
 BUTTONS: dict[str, int] = {

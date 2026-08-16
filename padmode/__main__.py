@@ -12,7 +12,7 @@ import signal
 import sys
 from pathlib import Path
 
-from . import __version__
+from . import __version__, buttons
 from .actions import ACTIONS, ActionContext, ActionRunner
 from .config import Config, ConfigError, default_path, load
 from .daemon import Daemon
@@ -175,6 +175,20 @@ def cmd_devices(args: argparse.Namespace, config: Config) -> int:
         found = True
         marker = "==>" if path == chosen_path else "   "
         print(f"{marker} {path:20} {device.name!r}")
+        if path == chosen_path:
+            # Worth saying out loud: "LT does nothing" is otherwise a silent
+            # mystery, and which form a pad uses is invisible from outside.
+            from .input.reader import _trigger_axes
+
+            translated = _trigger_axes(device)
+            if translated:
+                names = ", ".join(sorted(
+                    buttons.TRIGGERS[axis] for axis in translated
+                ))
+                print(f"    {names} are analogue axes on this pad, and are "
+                      "translated into button presses")
+            else:
+                print("    triggers report as buttons on this pad")
 
     if not found:
         print("No gamepads detected.")
@@ -218,6 +232,8 @@ def cmd_config(args: argparse.Namespace, config: Config) -> int:
     print("\n[general]")
     print(f'modifier = "{config.modifier}"')
     print(f"volume_step = {config.volume_step}")
+    print(f"trigger_threshold = {config.trigger_threshold:g}"
+          "   # how far LT/RT must be squeezed")
     print("\n[bindings]")
     for name, binding in sorted(config.bindings.items()):
         rendered = f'"{binding}"' if isinstance(binding, str) else repr(binding)

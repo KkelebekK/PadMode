@@ -219,3 +219,83 @@ class TestDeviceSelection(unittest.TestCase):
 
         # A keyboard must never be selectable as a gamepad, however it is named.
         self.assertIsNone(find_gamepad("selftest keyboard"))
+
+
+def _analogue_trigger_capabilities() -> dict:
+    """A pad shaped like a real Xbox one: triggers as axes, no BTN_TL2/TR2."""
+    caps = _gamepad_capabilities()
+    trigger = AbsInfo(value=0, min=0, max=255, fuzz=0, flat=0, resolution=0)
+    caps[ecodes.EV_ABS] = list(caps[ecodes.EV_ABS]) + [
+        (ecodes.ABS_Z, trigger),
+        (ecodes.ABS_RZ, trigger),
+    ]
+    return caps
+
+
+@unittest.skipUnless(_uinput_available(), "needs write access to /dev/uinput")
+class TestAnalogueTriggers(unittest.TestCase):
+    """A squeeze on ABS_Z has to reach a binding as if LT were a button.
+
+    Everything else about triggers is unit-tested; this is the part that can
+    only be checked by pushing real readings through the real read loop, since
+    which pads need translating is read from the device's own capabilities.
+    """
+
+    def setUp(self):
+        from padmode.config import parse
+        from padmode.input import GamepadReader
+
+        self.ui = UInput(
+            _analogue_trigger_capabilities(), name=DEVICE_NAME, version=1
+        )
+        self.addCleanup(self._close)
+
+        self.runner = RecordingRunner()
+        self.reader = GamepadReader(name=DEVICE_NAME, retry_delay=0.05)
+        config = parse({"bindings": {"LT": "audio.toggle_mute"}})
+        self.daemon = Daemon(config, self.reader, self.runner)
+        self.thread = threading.Thread(target=self.daemon.run, daemon=True)
+        self.thread.start()
+        self.addCleanup(self._shutdown)
+        if not _wait_for(lambda: self.reader.device is not None):
+            self.fail("reader never found the synthetic device")
+
+    def _close(self):
+        try:
+            self.ui.close()
+        except (OSError, ValueError):
+            pass
+
+    def _shutdown(self):
+        self.reader.stop()
+        try:
+            self.ui.write(ecodes.EV_ABS, ecodes.ABS_X, 4242)
+            self.ui.syn()
+        except (OSError, ValueError):
+            pass
+        self.thread.join(timeout=DEADLINE)
+
+    def squeeze(self, value: int) -> None:
+        self.ui.write(ecodes.EV_ABS, ecodes.ABS_Z, value)
+        self.ui.syn()
+
+    def test_the_reader_spotted_that_this_pad_needs_translating(self):
+        self.assertEqual(self.reader.trigger_axes, {ecodes.ABS_Z: 0x138,
+                                                    ecodes.ABS_RZ: 0x139})
+
+    def test_squeezing_the_trigger_fires_its_binding(self):
+        self.ui.write(ecodes.EV_KEY, ecodes.BTN_MODE, 1)
+        self.ui.syn()
+        self.assertTrue(_wait_for(lambda: self.reader.grabbed))
+        self.squeeze(255)
+        self.assertTrue(_wait_for(lambda: len(self.runner.ran) >= 1),
+                        "an analogue trigger never reached its binding")
+        self.assertEqual(self.runner.ran, ["audio.toggle_mute"])
+
+    def test_a_light_touch_does_not(self):
+        self.ui.write(ecodes.EV_KEY, ecodes.BTN_MODE, 1)
+        self.ui.syn()
+        self.assertTrue(_wait_for(lambda: self.reader.grabbed))
+        self.squeeze(40)
+        time.sleep(0.25)  # let the loop do the wrong thing before asserting
+        self.assertEqual(self.runner.ran, [])

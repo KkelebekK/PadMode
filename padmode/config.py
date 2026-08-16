@@ -252,6 +252,12 @@ class Config:
     modifier: str = DEFAULT_MODIFIER
     #: Volume change per press, in percent.
     volume_step: int = DEFAULT_VOLUME_STEP
+    #: How far an analogue trigger must be squeezed before ``LT``/``RT`` count
+    #: as pressed, from 0.0 to 1.0. Only relevant on pads that report their
+    #: triggers as axes, which is most of them; a pad with digital triggers
+    #: ignores this entirely. Releasing happens a little lower, so a finger
+    #: resting on the threshold does not chatter.
+    trigger_threshold: float = 0.5
     #: Canonical button name -> action id or argv list.
     bindings: dict[str, Binding] = field(default_factory=lambda: dict(DEFAULT_BINDINGS))
     desktop: DesktopConfig = field(default_factory=DesktopConfig)
@@ -329,6 +335,17 @@ def parse(data: dict[str, Any]) -> Config:
                 "the modifier must be a real button you can hold"
             )
         cfg = replace(cfg, modifier=modifier)
+
+    if "trigger_threshold" in general:
+        value = general["trigger_threshold"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError("general.trigger_threshold must be a number")
+        if not 0.05 <= value <= 0.95:
+            raise ConfigError(
+                "general.trigger_threshold must be between 0.05 and 0.95 "
+                "(a fraction of full squeeze)"
+            )
+        cfg = replace(cfg, trigger_threshold=float(value))
 
     if "volume_step" in general:
         step = general["volume_step"]

@@ -59,6 +59,7 @@ class FakeReader:
         self.grabbed = False
         self.tick: float | None = None
         self.axis_ranges: dict[int, tuple[int, int]] = {}
+        self.trigger_axes: dict[int, int] = {}
 
     def grab(self) -> None:
         self.grabbed = True

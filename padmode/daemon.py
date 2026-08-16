@@ -41,6 +41,11 @@ TICK_INTERVAL = 1.0 / TICK_HZ
 #: pointer is not moving, so 20 Hz is plenty to notice the settle elapsing.
 SETTLE_TICK = 0.05
 
+#: How far below ``trigger_threshold`` an analogue trigger must fall before it
+#: counts as released. Without the gap, a finger resting near the threshold
+#: chatters out presses and releases without moving.
+TRIGGER_HYSTERESIS = 0.15
+
 #: How often we look for the window of an app we just launched. Each look is
 #: one short-lived process, so this trades a little latency for staying well
 #: clear of spawning one 60 times a second.
@@ -130,6 +135,15 @@ class State:
     sticks: dict[int, float] = field(default_factory=dict)
     #: Axis ranges from the open device, for normalising stick readings.
     axis_ranges: dict[int, tuple[int, int]] = field(default_factory=dict)
+    #: Trigger axis -> the key code it stands in for, from the open device.
+    #: Empty when the pad reports its triggers as buttons already.
+    trigger_axes: dict[int, int] = field(default_factory=dict)
+    #: Trigger axis -> whether it currently counts as held. Deliberately *not*
+    #: cleared by :meth:`reset_inputs`: it mirrors where the user's finger
+    #: actually is, which a mode change does not alter. Clearing it mid-hold
+    #: would swallow the release and leave everything downstream believing the
+    #: trigger was still down.
+    triggers: dict[int, bool] = field(default_factory=dict)
     #: D-pad axis code -> key code currently held, so it can be released.
     hats: dict[int, int] = field(default_factory=dict)
     #: Axes that have fired and are waiting to be re-armed by returning to
@@ -213,6 +227,12 @@ def decide(
     rather than a call to the clock so this stays pure and the time-dependent
     behaviour (stick settling) is testable without sleeping.
 
+    An analogue trigger is turned into a press or release of its button before
+    anything else looks at the event, so ``LT`` and ``RT`` behave like every
+    other button everywhere they can appear -- as the modifier, as
+    ``desktop.enter``, in any bindings table -- without a single downstream
+    branch knowing they came from an axis.
+
     * Pressing the modifier grabs the pad, so buttons become commands rather
       than leaking into the running game.
     * While it is held, a bound button yields its binding, the configured
@@ -222,6 +242,12 @@ def decide(
       button. The two behave identically here; they differ only in what the
       daemon does on the way in and out.
     """
+    if ev_type == buttons.EV_ABS and ev_code in state.trigger_axes:
+        translated = _trigger_event(ev_code, ev_value, state, config)
+        if translated is None:
+            return NOTHING  # a trigger moving, but not across the threshold
+        ev_type, ev_code, ev_value = translated
+
     if state.mode in PAD_MODES:
         return _decide_desktop(ev_type, ev_code, ev_value, state, config, now)
 
@@ -286,6 +312,32 @@ def decide(
         # daemon defers the activation past that release (gotcha §6.1).
         return Decision(frontend=True)
     return Decision(binding=binding)
+
+
+def _trigger_event(
+    ev_code: int, ev_value: int, state: State, config: Config
+) -> tuple[int, int, int] | None:
+    """Turn a trigger reading into a button press or release, or None.
+
+    None means "nothing to report": the trigger moved, but not across a
+    boundary. Most trigger events are exactly that, since a squeeze produces a
+    stream of readings on the way down and back up.
+
+    Releasing lower than it presses is not decoration. A trigger resting near
+    the threshold, or one with a worn spring, would otherwise chatter out a
+    stream of presses and releases from a finger that is not moving.
+    """
+    lo, hi = state.axis_ranges.get(ev_code, buttons.DEFAULT_TRIGGER_RANGE)
+    level = buttons.normalize_trigger(ev_value, lo, hi)
+    code = state.trigger_axes[ev_code]
+    held = state.triggers.get(ev_code, False)
+    if not held and level >= config.trigger_threshold:
+        state.triggers[ev_code] = True
+        return (buttons.EV_KEY, code, 1)
+    if held and level <= max(0.0, config.trigger_threshold - TRIGGER_HYSTERESIS):
+        state.triggers[ev_code] = False
+        return (buttons.EV_KEY, code, 0)
+    return None
 
 
 def _decide_desktop(
@@ -642,6 +694,11 @@ class Daemon:
         #: same convention as ``virtual`` and ``windows``: absent means the one
         #: feature is off, never that anything fails.
         self._osk = osk
+        #: When we last asked the keyboard to do something, so the round trip
+        #: can be reported rather than guessed at. The renderer owning
+        #: selection costs a trip per keypress (docs/on-screen-keyboard.md);
+        #: this is how we find out what that actually costs.
+        self._osk_sent_at: float | None = None
         #: Key codes the keyboard has latched down (ctrl/alt/super). Tracked
         #: here rather than trusted to the renderer: a modifier left held is a
         #: desktop nobody can use, and the renderer is the thing most likely to
@@ -723,6 +780,7 @@ class Daemon:
 
     def _handle(self, ev_type: int, ev_code: int, ev_value: int) -> None:
         self._state.axis_ranges = self._reader.axis_ranges
+        self._state.trigger_axes = self._reader.trigger_axes
         was = self._state.mode
         decision = decide(
             ev_type, ev_code, ev_value, self._state, self._config, time.monotonic()
@@ -869,6 +927,7 @@ class Daemon:
         if op.kind == "step":
             self._osk.step(op.value)
         elif op.kind == "act":
+            self._osk_sent_at = time.monotonic()
             self._osk.act(op.value)
 
     def _open_osk(self) -> None:
@@ -914,6 +973,12 @@ class Daemon:
             self._release_osk_mods()
 
     def _handle_osk(self, kind: str, fields: dict) -> None:
+        if kind in (osk_protocol.TYPE, osk_protocol.KEY) and self._osk_sent_at:
+            # Includes our own tick: we collect the reply on the next one, so
+            # up to 16ms of this is the daemon's polling, not the renderer.
+            log.debug("osk round trip %.1f ms",
+                      (time.monotonic() - self._osk_sent_at) * 1000)
+            self._osk_sent_at = None
         if kind == osk_protocol.TYPE:
             text = fields.get("text")
             codes = buttons.keys_for_char(text) if isinstance(text, str) else None

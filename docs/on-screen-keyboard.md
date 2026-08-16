@@ -7,16 +7,16 @@ sends you looking for a keyboard.
 
 Modelled on the Xbox and PlayStation keyboards.
 
-**Status: working on hardware for the core path.** Driven from a real gamepad
-on Plasma 6.7: the keyboard opens, types into an application (letters, shift
-and the whole symbol layer), spans the output it lands on, and follows the
-active monitor across a two-output session with mixed scaling. 52 tests cover
-the grid, protocol, config and routing.
+**Status: done, and the manual checklist is complete.** Driven from a real
+gamepad on Plasma 6.7: the keyboard opens, types into an application (letters,
+shift, the symbol layer and latching Ctrl/Alt/Super), spans the output it lands
+on, follows the active monitor across a two-output session with mixed scaling,
+draws over a fullscreen game, and survives having its renderer killed without
+stranding the pad. Round-trip latency is about a millisecond plus our own tick.
+61 tests cover the grid, protocol, config and routing.
 
-Several checklist items remain untested — the pointer staying live while typing,
-behaviour over a fullscreen game, round-trip latency, and what a dying renderer
-looks like from the user's seat. They are listed in §Manual checklist, still
-unticked.
+What is *not* established is breadth: one game, one compositor, one pad. The
+open items are listed in §Still unmeasured.
 
 ---
 
@@ -162,9 +162,12 @@ a backstop in the daemon rather than the renderer — if the renderer dies while
 holding one. The daemon tracks exactly which codes *it* latched, so releasing
 them cannot disturb a key some other binding is holding.
 
-Verified end to end without a gamepad, by feeding synthetic pad events into a
-real daemon and watching the virtual keyboard device: `LEFTMETA down, A down,
-A up, LEFTMETA up`, and a Vicinae window appearing where there was none.
+Verified twice: first without a gamepad, by feeding synthetic pad events into
+a real daemon and watching the virtual keyboard device (`LEFTMETA down, A down,
+A up, LEFTMETA up`, and a Vicinae window appearing where there was none), then
+from a real pad on Plasma 6.7 — including that the latch is genuinely cleared
+afterwards, which is the half that would otherwise turn every later keystroke
+into a shortcut.
 
 One consequence worth knowing rather than fixing: latching Super and unlatching
 it without pressing anything in between opens KDE's application launcher. We
@@ -272,13 +275,31 @@ window operation: `_leave` stops the renderer before `_schedule_return`, and
 overlay entry pre-warms only after its window work is done. Costs 0.6 ms to put
 the keyboard back.
 
-**2. Over a fullscreen game. Not measured.** Gotcha §6.2 established that KWin
-drops direct scanout when something must be composited on top, which is why
-overlays work; a layer surface on the overlay layer should force the same
-thing. "Should" is how §6.2 got written wrong the first time, so this stays
-unmeasured until someone runs it — it is on the manual checklist.
+**2. Over a fullscreen game. Measured: it works.** Tried against *The Farmer
+Was Replaced* running fullscreen — the keyboard drew over it and typing reached
+the game. This is gotcha §6.2 again: KWin drops direct scanout as soon as
+something has to be composited on top, and a layer surface on the overlay layer
+forces that just as an overlay window does.
 
-**3. Round-trip latency per keypress. Not measured.** Needs the real path.
+One game is one game, not a rule. §6.2 was written wrong the first time by
+generalising from a single setup, so treat this as "works on the game it was
+tried on" and record others as they are tried — particularly anything running
+under its own gamescope session, which bypasses the compositor entirely.
+
+**3. Round-trip latency per keypress. Measured: ~1 ms, plus our own tick.**
+128 samples from a real typing session: min **1.0 ms**, median 10.2 ms, p90
+16.1 ms, max 17.3 ms.
+
+The spread is not the renderer. Replies are collected on the daemon's 60 Hz
+tick, so a reply lands uniformly somewhere in a 16.7 ms window — which is
+exactly what a 1.0 ms floor and a 17.3 ms ceiling describe. **The ownership
+split costs about a millisecond**; the rest is padmode polling the pipe on the
+tick rather than in the read loop's selector.
+
+Imperceptible in use, so it is not worth changing today. But if the keyboard
+ever needs to feel snappier, the fix is to select on the renderer's pipe
+alongside the gamepad rather than waiting for the tick — the renderer is not
+the slow part and tuning it would be aiming at the wrong thing.
 
 **4. What happens when the renderer dies.** Handled and tested: EOF ends OSK
 mode, the daemon logs once and carries on. The grab belongs to the *mode*, not
@@ -424,8 +445,8 @@ deliberately.
 
 Everything here is honest about not having happened yet:
 
-- **Over a fullscreen game** (risk 2).
-- **Round-trip latency per keypress** (risk 3). Trace with `watch_virtual.py`.
+- **Any game other than the one tried** (risk 2), especially a gamescope
+  session.
 - **Whether it appears over the KDE lock screen**, which would make the unlock
   module (v0.7) "the OSK, at the lock screen" rather than its own thing.
 - **Any compositor other than KWin.**
@@ -446,28 +467,38 @@ here. CLAUDE.md §5: do not pretend these are automated.
       `!@#$%^^++_-)({}\\<>` all arrived correctly.
 - [x] **It spans the output** it lands on, at the configured share of screen
       height. *Verified* on both a 1536x830 and a 2560x1406 output.
-- [ ] **The pointer still works** while the keyboard is up — this is the whole
-      premise of it being a layer.
-- [ ] **`SELECT` is still Escape** while the keyboard is up, and `A` is not a
-      left-click until you close it with `B`.
-- [ ] **The exit button leaves desktop mode** with the keyboard up, in one
-      press, and the keyboard goes with it.
-- [ ] **Nothing is left on screen** after leaving. `kdotool search --class .`
-      returns the same count as before.
+- [x] **The pointer still works** while the keyboard is up. *Verified* — the
+      whole premise of it being a layer rather than a mode.
+- [x] **`SELECT` is still Escape** while the keyboard is up, and `A` is not a
+      left-click until you close it with `B`. *Verified* — only the d-pad and
+      the buttons in `[osk.bindings]` are taken.
+- [x] **The exit button leaves desktop mode** with the keyboard up, in one
+      press, and the keyboard goes with it. *Verified*.
+- [x] **Nothing is left on screen** after leaving. *Verified* — no surface in
+      `kdotool search --class .`, and no renderer process.
 - [x] **Move between outputs mid-session**, in both directions, repeatedly.
       *Verified.* This one item found three separate bugs — all of §Sizing
       items 3, 4 and 5 — and none of them had a CI test available, because the
       renderer needs a compositor. Re-run it after any change to the sizing
       code, in **both** directions: growing and shrinking took different paths
       and only one of them worked.
-- [ ] **Over a fullscreen game** (risk 2, unmeasured). Start a game, overlay
-      it, open the keyboard, type into something. Record what happened —
-      including if it does not work, and on which game.
-- [ ] **Kill the renderer** while it is up (`pkill -f padmode.osk`). Desktop
-      mode carries on, the pointer still moves, the pad is not stranded, and
-      the log says so once.
-- [ ] **Round-trip latency** (risk 3). `watch_virtual.py` while typing; is the
-      delay between the button and the keystroke perceptible?
+- [x] **Over a fullscreen game** (risk 2). *Verified* against *The Farmer Was
+      Replaced*, fullscreen: the keyboard drew over it and typing reached the
+      game. One game is not a rule — record others as they are tried, and
+      expect a gamescope session to behave differently.
+- [x] **Kill the renderer** while it is up (`pkill -f padmode.osk`). *Verified*
+      — the keyboard vanished, the pointer kept working, the face buttons went
+      back to clicking, Guide still left the mode, and the log carried exactly
+      one warning. The pad was readable by other processes afterwards, so the
+      grab was not stranded.
+- [x] **Round-trip latency** (risk 3). *Verified* — 128 samples, 1.0 ms floor
+      and a 17.3 ms ceiling set by our own 60 Hz tick. Not perceptible while
+      typing. The daemon logs each trip at debug level, so `-v` re-measures it
+      any time.
+- [x] **Latching Ctrl/Alt/Super.** Latch `super`, commit a letter, and a global
+      shortcut fires. *Verified* — Vicinae opened from the pad. Then close and
+      reopen the keyboard and type: it must be a plain letter, because a latch
+      that survived would turn everything after it into a shortcut.
 - [x] **Without `gtk4-layer-shell`**, or on X11: *verified* by running the
       renderer with no `LD_PRELOAD`. It reports
       `{"t":"failed","reason":"layer-shell unavailable ..."}`, exits 1 and

@@ -19,6 +19,8 @@ from collections.abc import Iterator
 
 from evdev import InputDevice, ecodes, list_devices
 
+from .. import buttons
+
 log = logging.getLogger(__name__)
 
 
@@ -64,6 +66,28 @@ def _axis_ranges(device: InputDevice) -> dict[int, tuple[int, int]]:
     except OSError:
         return {}
     return {code: (info.min, info.max) for code, info in caps}
+
+
+def _trigger_axes(device: InputDevice) -> dict[int, int]:
+    """Trigger axes that should stand in for buttons, as axis code -> key code.
+
+    Most pads report the triggers only as ``ABS_Z``/``ABS_RZ`` and never emit
+    ``BTN_TL2``/``BTN_TR2``, so without this ``LT`` and ``RT`` are unbindable.
+    A few report both, and translating those would deliver every trigger press
+    twice -- so a trigger is translated only when its button is absent.
+    """
+    try:
+        caps = device.capabilities()
+    except OSError:
+        return {}
+    keys = set(caps.get(ecodes.EV_KEY, ()))
+    axes = {code for code, _ in caps.get(ecodes.EV_ABS, ())}
+    translated = {}
+    for axis, name in buttons.TRIGGERS.items():
+        code = buttons.BUTTONS[name]
+        if axis in axes and code not in keys:
+            translated[axis] = code
+    return translated
 
 
 def _candidates() -> Iterator[InputDevice]:
@@ -126,6 +150,7 @@ class GamepadReader:
         self._stop = False
         self._tick_interval: float | None = None
         self._axis_ranges: dict[int, tuple[int, int]] = {}
+        self._trigger_axes: dict[int, int] = {}
 
     @property
     def axis_ranges(self) -> dict[int, tuple[int, int]]:
@@ -135,6 +160,15 @@ class GamepadReader:
         device rather than assumed. Empty until a device is open.
         """
         return self._axis_ranges
+
+    @property
+    def trigger_axes(self) -> dict[int, int]:
+        """Trigger axes to translate into button presses, axis -> key code.
+
+        Empty for a pad whose triggers are already buttons, and empty until
+        a device is open.
+        """
+        return self._trigger_axes
 
     def set_tick(self, interval: float | None) -> None:
         """Start or stop the heartbeat, in seconds; None blocks indefinitely.
@@ -259,6 +293,7 @@ class GamepadReader:
             log.debug("no gamepad found; retrying in %.1fs", self._retry_delay)
         self._device = device
         self._axis_ranges = _axis_ranges(device) if device else {}
+        self._trigger_axes = _trigger_axes(device) if device else {}
         return device
 
     def _close(self) -> None:

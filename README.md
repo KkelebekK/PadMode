@@ -12,13 +12,12 @@ drive the whole desktop from the couch without reaching for either. Or bind a
 button to an app and have it come up *over* your game, with one press to send
 you straight back — and another button to go home to your game frontend.
 
-> **Status: v0.5 in progress.** Media and volume control, a full desktop mode,
-> app overlays that return you to the game, a bindable frontend to land on when
-> the game is gone, and a metadata generator for Heroic libraries — all
-> released in v0.4. The on-screen keyboard is built and tested but has not yet
-> been driven from a real gamepad, so treat it as unfinished. Everything except
-> overlays and the keyboard still works on every Linux desktop with no
-> compositor involvement at all.
+> **Status: v0.5.** Media and volume control, a full desktop mode, app overlays
+> that return you to the game, a bindable frontend to land on when the game is
+> gone, a metadata generator for Heroic libraries, and a console-style
+> on-screen keyboard you drive with the pad. Everything except overlays and the
+> keyboard still works on every Linux desktop with no compositor involvement at
+> all.
 
 `padmode` is a provisional name and may change before 1.0.
 
@@ -300,8 +299,12 @@ Everything above is a default, and every default can be changed. Create
 # name = "X-Box"
 
 [general]
-modifier = "GUIDE"   # the button you hold; SELECT and START also work well
+modifier = "GUIDE"   # the button you hold. Keep it on Guide: any button your
+                     # games read gets left latched down -- see Known limitations
 volume_step = 5      # percent per press
+trigger_threshold = 0.5   # how far LT/RT must be squeezed, on pads whose
+                          # triggers are analogue axes. Releases a little below
+                          # this, so a resting finger does not chatter
 
 [bindings]
 # Bindings merge over the defaults, so you only write what you change.
@@ -381,6 +384,14 @@ Button names accept the obvious spellings: `RB` or `R1`, `GUIDE` or `MODE` or
 `HOME`, `SELECT` or `BACK`, `DPAD_UP` or `UP`, `RS_RIGHT` or
 `RIGHT_STICK_RIGHT`, in any case.
 
+**The triggers are bindable too.** Most pads — every Xbox controller among
+them — report `LT` and `RT` as analogue axes rather than buttons, so padmode
+translates a squeeze past `trigger_threshold` into a press and a release below
+it back into a release. Bind them like any other button, including as the
+modifier or as `desktop.enter`. Pads that already report their triggers as
+buttons are left alone, so nothing fires twice. `padmode devices` says which
+kind yours is.
+
 Bad configuration stops the daemon with an explanation rather than starting up
 and quietly ignoring half your bindings.
 
@@ -441,7 +452,7 @@ and quietly ignoring half your bindings.
 | ✅ v0.2 | Virtual mouse/keyboard, desktop mode | No |
 | ✅ v0.3 | Window backends, in-game overlays, return-to-game | KDE + X11 |
 | ✅ **v0.4** | Frontend button and fallback, Heroic metadata generator | KDE + X11 |
-| 🔨 v0.5 | On-screen keyboard you drive with the pad, like a console | KDE Wayland only |
+| ✅ **v0.5** | On-screen keyboard you drive with the pad, like a console | KDE Wayland only |
 | v0.6 | Steam metadata generator | No |
 | v0.7 | Gamepad unlock (opt-in, off by default) | Screensaver D-Bus |
 
