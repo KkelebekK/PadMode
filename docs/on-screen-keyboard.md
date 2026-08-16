@@ -28,7 +28,8 @@ open items are listed in §Still unmeasured.
 | Dependencies | The GUI toolkit is **optional and probed at runtime**, exactly like `playerctl` and `kdotool`. The daemon's own dependencies stay stdlib + `python-evdev` |
 | Grid and selection | Owned by the **renderer** |
 | Typing | The **daemon** types on the virtual keyboard it already creates (v0.2) |
-| Scope for v1 | Xbox-style: letters, digits, a symbol layer, shift, space, backspace, enter — **plus latching Ctrl/Alt/Super**, which consoles have no use for and a desktop cannot do without |
+| Layout | A **60% keyboard**: staggered widths, Tab/Caps/Shift/Enter where hands expect them, modifiers along the bottom |
+| Scope | Letters, digits, a symbol layer, shift, caps, space, backspace, enter, tab, cursor keys — **plus latching Ctrl/Alt/Super**, which consoles have no use for and a desktop cannot do without |
 | Toolkit | **GTK4 + `gtk4-layer-shell`** via PyGObject |
 | Session support | **Wayland only.** X11 disables the keyboard with one line |
 | Is it a mode? | **No** — a layer over a pad-driven mode |
@@ -86,6 +87,64 @@ these are face buttons, and no such bounce has been traced on them. Inventing a
 filter for it would be the exact mistake CLAUDE.md §4 was written about. If a
 character ever types twice, trace it before changing anything.
 
+## The layout
+
+A 60% keyboard, with four deliberate departures: the symbol-layer toggle takes
+Escape's place, the number row carries no shifted legends, there is no `/`, and
+the cursor keys fill the space to the right of the space bar.
+
+| Row | Letters | Symbols |
+|---|---|---|
+| 4 | `?#` `1`…`0` `⌫` | `?#` `!@#$%^&*()` `⌫` |
+| 3 | `tab` `q`…`p` `\` | `tab` `-_=+[]{};:` `\|` |
+| 2 | `caps` `a`…`l` `↵` | `caps` `' " ` ~ < >` `↵` |
+| 1 | `⇧` `z`…`m` `,` `.` `⇧` | `⇧` `, . / ?` `⇧` |
+| 0 | `ctrl` `win` `alt` `space` `←` `→` | *identical* |
+
+**Every row is exactly 13U on both layers**, and that is load bearing twice
+over. The rows line up, and toggling layers cannot change the surface height —
+which matters because a mapped layer surface only resizes reliably when it
+*grows* (§Sizing, item 5). A test asserts it rather than trusting it.
+
+Only the character keys differ between layers. Every action key is shared by
+identity, so nothing a thumb is resting on moves when you toggle: Backspace
+does not wander off mid-word. `|` sits where `\` does — the same physical key,
+its shifted meaning — and `,` and `.` are repeated on the symbol layer because
+going back a layer for a decimal point would be absurd. Between them the two
+layers cover all 32 ASCII punctuation characters, and a test checks that every
+character on either layer is one the virtual keyboard can actually send.
+
+Right Shift is 1.75U rather than a real 60%'s 2.75U: keeping `.` costs a unit,
+and the shift reached for least is the cheapest place to find it.
+
+### Navigating a grid that is not a lattice
+
+Keys range from 1U to 6.25U, so moving by column index stops meaning anything
+— the fourth key of the bottom row is the space bar, and the fourth key of the
+row above is nowhere near it. Vertical movement instead goes by **position**:
+each row's key spans are precomputed in units, and the keyboard remembers a
+horizontal coordinate the way a text editor remembers a desired column. Left
+and right reset it to the new key's centre; up and down keep it and select
+whichever key covers it.
+
+The visible result is that a run of `up` presses travels in a straight line —
+from the middle of the space bar you get `b`, `h`, `y` — and that going down
+past a row of wide keys and back returns you where you started instead of
+dragging the highlight sideways.
+
+### Badges
+
+Each key carries the pad button that operates it, the way a console keyboard
+does: Xbox colours for A/B/X/Y, plain grey for the shoulders and stick clicks.
+They are read from the daemon's action → button hints rather than baked into
+the layout, so rebinding a button moves its badge; a badge that lied would be
+worse than none.
+
+`commit` and `close` are the only two shortcuts with no key of their own —
+commit acts on whatever is highlighted, close makes the whole thing vanish —
+so they get a two-item line along the bottom. That line replaced a six-item
+legend that duplicated what the badges now say.
+
 ## A layer, not a mode
 
 `osk` is a flag on the state (`State.osk`), valid only while `mode` is in
@@ -135,7 +194,7 @@ reading the active layout, which nothing here does.
 
 ### Latching modifiers
 
-Ctrl, Alt and Super are on the action row and **latch**: press once to hold,
+Ctrl, Alt and Super sit along the bottom row and **latch**: press once to hold,
 press again to release. This is the one deliberate departure from console
 parity — an Xbox keyboard has no Ctrl because there is nothing to press it
 against, and a desktop is nothing but things to press it against.
@@ -495,6 +554,11 @@ here. CLAUDE.md §5: do not pretend these are automated.
       and a 17.3 ms ceiling set by our own 60 Hz tick. Not perceptible while
       typing. The daemon logs each trip at debug level, so `-v` re-measures it
       any time.
+- [x] **The 60% layout, badges and the new shortcut map.** *Verified* on a real
+      pad: badges land on the right keys with A/B/X/Y in Xbox colours, RT
+      toggles layers and the toggle reads `abc` on symbols, L3 locks caps and
+      the grid redraws in capitals, LB/RB move the text cursor, and repeated
+      layer toggles do not resize the keyboard.
 - [x] **Latching Ctrl/Alt/Super.** Latch `super`, commit a letter, and a global
       shortcut fires. *Verified* — Vicinae opened from the pad. Then close and
       reopen the keyboard and type: it must be a plain letter, because a latch

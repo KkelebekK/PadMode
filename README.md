@@ -150,21 +150,40 @@ Press **Y** in desktop mode and a console-style keyboard appears along the
 bottom of the screen. A desktop you can drive but not type into still sends you
 looking for a keyboard, which rather defeats the point.
 
+It is laid out like a 60% keyboard, so Tab, Caps, Shift, Enter and the
+modifiers are where your hands already expect them. Four departures: the
+symbol-layer toggle takes Escape's place, the number row carries no shifted
+legends (those live on the symbol layer), there is no `/`, and the cursor keys
+sit beside the space bar.
+
 | Input | Does |
 |---|---|
 | D-pad | Move around the grid |
 | A | Type the highlighted key |
 | B | Put the keyboard away |
-| X / Y | Space / Backspace |
-| LB / RB | Shift / symbols |
+| X | Backspace |
+| Y | Space |
+| LB / RB | Move the text cursor left / right |
+| LT | Shift |
+| RT | Symbols / letters |
+| L3 | Caps lock |
 | Start | Enter |
 | **Left stick** | Still moves the pointer |
 
-The bottom row is `⇧ ctrl alt super ?# space ⌫ ↵`. **Ctrl, Alt and Super
-latch** — press once to hold, press again to let go — so `Super`+`a` opens your
-launcher, `Ctrl` stays down while you click something with the stick, and `Alt`
-can be held across several keys. They release themselves whenever the keyboard
-goes away, so you can't strand your desktop with a modifier stuck down.
+**Every shortcut is printed on the key it belongs to**, the way a console
+keyboard does it — a yellow Y on the space bar, a blue X on Backspace, `RT` on
+the layer toggle. Only `A` and `B` get a line of their own at the bottom, since
+neither is a key on the grid. Rebind anything in `[osk.bindings]` and its badge
+moves with it.
+
+The d-pad moves by *position*, not by column: the key above the middle of the
+space bar is the one directly above it, not the fourth key of the row.
+
+**Ctrl, Alt and Super latch** — press once to hold, press again to let go — so
+`Super`+`a` opens your launcher, `Ctrl` stays down while you click something
+with the stick, and `Alt` can be held across several keys. They release
+themselves whenever the keyboard goes away, so you can't strand your desktop
+with a modifier stuck down.
 
 (Latching Super and unlatching it without pressing anything opens KDE's
 launcher. That's a real key press and release, and a hardware keyboard does the
@@ -375,9 +394,14 @@ height = 30            # percent of screen height; the width scales to match,
                        # so it looks the same on a laptop panel and a TV
 # preload = "/usr/lib/libgtk4-layer-shell.so"   # only if autodetection fails
 
-[osk.bindings]         # what the pad does while the keyboard is up
-A = "commit"           # commit, close, space, enter, back, shift, layer
-B = "close"            # the d-pad navigates the grid and cannot be rebound
+[osk.bindings]         # what the pad does while the keyboard is up.
+A = "commit"           # commit, close, back, space, enter, tab, shift,
+B = "close"            # capslock, layer, left, right, ctrl, alt, super.
+X = "back"             # The d-pad navigates the grid and cannot be rebound.
+Y = "space"            # Whatever you bind, the badge on the key follows.
+LT = "shift"
+RT = "layer"
+L3 = "capslock"
 ```
 
 Button names accept the obvious spellings: `RB` or `R1`, `GUIDE` or `MODE` or

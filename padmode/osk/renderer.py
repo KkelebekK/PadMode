@@ -85,12 +85,30 @@ window.osk { background: transparent; }
     font-weight: 700;
 }
 .key.engaged { background: alpha(#4a7dff, 0.35); }
+/* The pad button that does this key's job, in its corner. Xbox colours,
+   because padmode names buttons the Xbox way everywhere else too. */
+.badge {
+    background: alpha(#000000, 0.5);
+    color: #e8eaf0;
+    border-radius: 999px;
+    margin: 2px;
+    padding: 0 3px;
+    font-weight: 700;
+}
+.badge.b-a { background: #3fa34a; color: #ffffff; }
+.badge.b-b { background: #cf4032; color: #ffffff; }
+.badge.b-x { background: #2f6fd0; color: #ffffff; }
+.badge.b-y { background: #d9a521; color: #14161c; }
 .hints {
     color: alpha(#e8eaf0, 0.45);
     font-size: 13px;
     padding: 6px 4px 0 4px;
 }
 """
+
+#: Buttons whose badge reads better as a glyph than as its name. Everything
+#: else -- A, B, X, Y, LB, RB, LT, RT, L3 -- is short enough already.
+BADGE_TEXT = {"START": "≡"}
 
 
 class Renderer:
@@ -283,12 +301,12 @@ class Renderer:
         out_w, out_h = self._output
         rows = len(self.keyboard.rows)
         target = out_h * self._height_pct / 100.0
-        # Solve for key height, treating the hint line as a fraction of a key.
+        # Solve for key height, treating the legend line as a fraction of a key.
         key_h = (target - VCHROME - rows * ROW_MARGIN) / (rows + 0.30)
         unit = int(key_h / KEY_ASPECT)
-        # The height-derived size still has to fit across the screen.
-        widest = max(len(row) for row in self.keyboard.rows)
-        unit = min(unit, int(out_w * WIDTH_BUDGET / widest))
+        # The height-derived size still has to fit across the screen. Every row
+        # is the same width in units, so one number covers both layers.
+        unit = min(unit, int(out_w * WIDTH_BUDGET / layout.ROW_UNITS))
         unit = max(KEY_MIN, min(unit, KEY_MAX))
         _log(f"rescale output={out_w}x{out_h} pct={self._height_pct:g} "
              f"target={target:.0f} unit={unit} (was {self._unit})")
@@ -298,6 +316,8 @@ class Renderer:
         self._sizing.load_from_data(
             f".key {{ font-size: {max(11, int(unit * 0.36))}px; }}"
             f".key.wide {{ font-size: {max(10, int(unit * 0.30))}px; }}"
+            f".badge {{ font-size: {max(9, int(unit * 0.22))}px; "
+            f"min-width: {max(12, int(unit * 0.30))}px; }}"
             f".hints {{ font-size: {max(10, int(unit * 0.22))}px; }}".encode()
         )
         self._apply_key_sizes()
@@ -305,12 +325,16 @@ class Renderer:
     def _apply_key_sizes(self) -> None:
         for r, widgets in enumerate(self._cells):
             for c, widget in enumerate(widgets):
-                widget.set_size_request(*self._key_size(self.keyboard.rows[r][c]))
+                key = self.keyboard.rows[r][c]
+                parent = widget.get_parent()  # the Overlay carrying the badge
+                (parent or widget).set_size_request(*self._key_size(key))
 
     def _key_size(self, key: layout.Key) -> tuple[int, int]:
         gap = max(4, self._unit // 8)
+        # Widths are fractional (1.5U, 2.25U, 6.25U), and a wide key swallows
+        # the gaps it spans, so it lines up with the keys above and below it.
         return (
-            self._unit * key.width + gap * (key.width - 1),
+            round(self._unit * key.width + gap * (key.width - 1)),
             int(self._unit * KEY_ASPECT),
         )
 
@@ -318,8 +342,8 @@ class Renderer:
     def _rebuild(self) -> None:
         """Build the widgets for the current layer, discarding the old ones.
 
-        From scratch rather than reconciling: the two layers are different
-        widths, and on a grid this small rebuilding costs nothing measurable.
+        From scratch rather than reconciling: on a grid this small rebuilding
+        costs nothing measurable, and the two layers differ in the middle.
         """
         child = self._grid_box.get_first_child()
         while child is not None:
@@ -337,15 +361,38 @@ class Renderer:
                 label.add_css_class("key")
                 if key.width > 1 or len(key.label) > 2:
                     # Word labels (ctrl, alt, super, space) need the smaller
-                    # font to fit a key that is one column wide.
+                    # font to fit a key that is one unit wide.
                     label.add_css_class("wide")
-                label.set_size_request(*self._key_size(key))
-                box.append(label)
+                cell = Gtk.Overlay()
+                cell.set_child(label)
+                cell.set_size_request(*self._key_size(key))
+                badge = self._badge_for(key)
+                if badge is not None:
+                    cell.add_overlay(badge)
+                box.append(cell)
                 widgets.append(label)
             self._grid_box.append(box)
             self._cells.append(widgets)
         self._grid_box.append(self._hint_label)
         self._refresh()
+
+    def _badge_for(self, key: layout.Key) -> Gtk.Widget | None:
+        """The pad button that does this key's job, drawn in its corner.
+
+        Taken from the daemon's hints rather than baked into the layout, so a
+        rebound button moves its badge with it -- bindings are meant to be
+        fully overridable, and a badge that lied would be worse than none.
+        """
+        button = self.hints.get(key.action or "")
+        if button is None:
+            return None
+        badge = Gtk.Label(label=BADGE_TEXT.get(button, button))
+        badge.add_css_class("badge")
+        badge.add_css_class(f"b-{button.lower()}")
+        badge.set_halign(Gtk.Align.END)
+        badge.set_valign(Gtk.Align.START)
+        badge.set_can_target(False)  # decoration, never a hit target
+        return badge
 
     def _refresh(self) -> None:
         """Move the highlight and repaint shift-sensitive labels."""
@@ -366,13 +413,17 @@ class Renderer:
         self._hint_label.set_label(self._hint_text())
 
     def _hint_text(self) -> str:
-        if not self.hints:
-            return ""
-        order = (("commit", "select"), ("close", "close"), ("back", "⌫"),
-                 ("space", "space"), ("shift", "shift"), ("layer", "?#"))
+        """The two actions that have no key of their own, and so no badge.
+
+        Everything else is labelled where it lives. Commit and close are not
+        keys on the grid -- commit acts on whatever is highlighted, and close
+        makes the whole thing go away -- so without this line there would be
+        no on-screen answer to "how do I press this" or "how do I get rid of
+        it".
+        """
         parts = [
             f"{self.hints[action]} {word}"
-            for action, word in order
+            for action, word in (("commit", "select"), ("close", "close"))
             if action in self.hints
         ]
         return "   ".join(parts)
@@ -382,9 +433,15 @@ class Renderer:
         if kind == protocol.SHOW:
             hints = fields.get("hints")
             if isinstance(hints, dict):
-                self.hints = {
+                fresh = {
                     str(k): str(v) for k, v in hints.items() if isinstance(v, str)
                 }
+                if fresh != self.hints:
+                    # Badges are built with the widgets, and the hints arrive
+                    # with the first show -- so the grid has to be rebuilt once
+                    # they land, or the very first keyboard has no badges.
+                    self.hints = fresh
+                    self._rebuild()
             self._show()
             return
         if kind == protocol.HIDE:

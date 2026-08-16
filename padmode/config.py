@@ -107,14 +107,22 @@ DEFAULT_DESKTOP_BINDINGS: dict[str, str] = {
 #: the most natural button, and ``B`` puts the keyboard away in one press when
 #: you want to click something. The d-pad is not listed because it navigates
 #: the grid and is not bindable in v1 -- the renderer needs it.
+#:
+#: The shoulders move the text cursor and the triggers change what the keys
+#: mean -- one trigger for shift, one for the symbol layer. The triggers are
+#: only usable here because analogue ones are translated into buttons (§2);
+#: on most pads they are axes and could not be bound at all before that.
 DEFAULT_OSK_BINDINGS: dict[str, str] = {
     "A": "commit",
     "B": "close",
-    "X": "space",
-    "Y": "back",
+    "X": "back",
+    "Y": "space",
     "START": "enter",
-    "LB": "shift",
-    "RB": "layer",
+    "LB": "left",
+    "RB": "right",
+    "LT": "shift",
+    "RT": "layer",
+    "L3": "capslock",
 }
 
 

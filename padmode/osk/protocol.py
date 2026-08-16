@@ -58,9 +58,15 @@ ACTIONS = frozenset({
     "back",      # backspace
     "space",
     "enter",
+    "tab",
     "shift",
+    "capslock",  # lock shift on, rather than a real KEY_CAPSLOCK
     "layer",     # letters <-> symbols
     "close",
+    # Move the text cursor. Worth pad buttons of their own: correcting a typo
+    # otherwise means closing the keyboard to use the pointer.
+    "left",
+    "right",
     # Latching modifiers: press once to hold, again to release.
     "ctrl",
     "alt",

@@ -54,11 +54,49 @@ def with_osk(config=None):
     return state
 
 
+class TestTheGridShape(unittest.TestCase):
+    """The 60% layout, and the invariant that keeps it resizable."""
+
+    def test_every_row_is_the_same_width_on_both_layers(self):
+        # Not cosmetic. Rows that disagree would not line up, and a layer that
+        # changed the surface height would hit the resize bug from v0.5: a
+        # mapped layer surface only propagates a size change when it *grows*.
+        for name, rows in layout.LAYERS.items():
+            for index, row in enumerate(rows):
+                with self.subTest(layer=name, row=index):
+                    self.assertAlmostEqual(
+                        sum(key.width for key in row), layout.ROW_UNITS
+                    )
+
+    def test_both_layers_have_the_same_number_of_rows(self):
+        counts = {len(rows) for rows in layout.LAYERS.values()}
+        self.assertEqual(len(counts), 1)
+
+    def test_the_frame_keys_do_not_move_between_layers(self):
+        # The whole point of swapping only the middle: nothing a thumb is
+        # resting on shifts when you toggle.
+        def frame(rows):
+            return [
+                [(k.action, k.width) for k in row if k.action]
+                for row in rows
+            ]
+        letters, symbols = layout.LETTER_LAYER, layout.SYMBOL_LAYER
+        self.assertEqual(frame(letters), frame(symbols))
+
+    def test_the_layer_toggle_sits_where_escape_would(self):
+        self.assertEqual(layout.LETTER_LAYER[0][0].action, "layer")
+
+    def test_the_cursor_keys_are_beside_the_space_bar(self):
+        bottom = layout.LETTER_LAYER[-1]
+        self.assertEqual([k.action for k in bottom][-3:], ["space", "left", "right"])
+
+
 class TestNavigation(unittest.TestCase):
     def setUp(self):
         self.kb = layout.Keyboard()
 
     def test_starts_on_a_letter(self):
+        # Column 0 of that row is Tab, so the default column is 1.
         self.assertEqual(self.kb.current.char, "q")
 
     def test_moving_right_and_down(self):
@@ -74,20 +112,54 @@ class TestNavigation(unittest.TestCase):
         self.kb.step("left")
         self.assertEqual(self.kb.col, len(self.kb.rows[self.kb.row]) - 1)
 
-    def test_rows_wrap_onto_the_action_row(self):
+    def test_rows_wrap(self):
         self.kb.row = 0
         self.kb.step("up")
         self.assertEqual(self.kb.row, len(self.kb.rows) - 1)
-        self.assertIsNotNone(self.kb.current.action)
 
-    def test_column_is_clamped_onto_a_shorter_row(self):
-        # The action row is much shorter than a letter row; moving down from
-        # the far right must land on a key that exists.
-        self.kb.row = len(self.kb.rows) - 2
-        self.kb.col = len(self.kb.rows[self.kb.row]) - 1
+    def test_vertical_movement_follows_position_not_column_number(self):
+        # The space bar is 6.25U and the fourth key of its row; the key above
+        # its middle is 'b', not the row above's fourth key. This is the whole
+        # reason navigation is not by column index.
+        self.kb.row, self.kb.col = 4, 3
+        self.kb._sync_x()
+        self.assertEqual(self.kb.current.action, "space")
+        self.kb.step("up")
+        self.assertEqual(self.kb.current.char, "b")
+
+    def test_a_vertical_run_stays_in_a_straight_line(self):
+        self.kb.row, self.kb.col = 4, 3
+        self.kb._sync_x()
+        self.assertEqual(
+            [self.kb.step("up") or self.kb.current.char for _ in range(3)],
+            ["b", "h", "y"],
+        )
+
+    def test_the_remembered_column_survives_a_narrow_row(self):
+        # Travelling down past the bottom row and back up must return you to
+        # where you started, not drag the highlight sideways.
+        self.kb.row, self.kb.col = 3, 9   # '.', near the right of its row
+        self.kb._sync_x()
+        start = self.kb.current.char
         self.kb.step("down")
-        self.assertLess(self.kb.col, len(self.kb.rows[self.kb.row]))
-        self.assertIsNotNone(self.kb.current)
+        self.kb.step("up")
+        self.assertEqual(self.kb.current.char, start)
+
+    def test_every_position_lands_on_a_real_key(self):
+        # Rows span the full width with no gaps, so no move can fall off one.
+        for layer in layout.LAYERS:
+            self.kb.layer = layer
+            for row in range(len(self.kb.rows)):
+                for col in range(len(self.kb.rows[row])):
+                    self.kb.row, self.kb.col = row, col
+                    self.kb._sync_x()
+                    for direction in ("up", "down", "left", "right"):
+                        with self.subTest(layer=layer, row=row, col=col,
+                                          direction=direction):
+                            before = (self.kb.row, self.kb.col)
+                            self.kb.step(direction)
+                            self.assertIsNotNone(self.kb.current)
+                            self.kb.row, self.kb.col = before
 
 
 class TestTypingAndShift(unittest.TestCase):
@@ -117,15 +189,41 @@ class TestTypingAndShift(unittest.TestCase):
         self.assertEqual(self.kb.shift, layout.SHIFT_OFF)
 
     def test_shift_does_not_change_digits(self):
-        self.kb.row, self.kb.col = 0, 0
+        self.kb.row, self.kb.col = 0, 1   # column 0 is the layer toggle
         self.kb.act("shift")
         # The symbol layer owns those characters; a digit key stays a digit,
         # which is the only version that survives a non-US layout.
         self.assertEqual(self.kb.press().text, "1")
 
-    def test_backspace_and_enter_are_named_keys(self):
-        self.assertEqual(self.kb.act("back"), layout.Emit(protocol.KEY, keys=("BACKSPACE",)))
-        self.assertEqual(self.kb.act("enter"), layout.Emit(protocol.KEY, keys=("ENTER",)))
+    def test_capslock_locks_shift_outright(self):
+        # One press, not the two that shift's off -> once -> lock would need.
+        self.kb.act("capslock")
+        self.assertEqual(self.kb.shift, layout.SHIFT_LOCK)
+        self.assertEqual(self.kb.press().text, "Q")
+        self.assertEqual(self.kb.press().text, "Q")
+
+    def test_capslock_again_turns_it_off(self):
+        self.kb.act("capslock")
+        self.kb.act("capslock")
+        self.assertEqual(self.kb.shift, layout.SHIFT_OFF)
+
+    def test_capslock_clears_a_one_shot_shift(self):
+        self.kb.act("shift")
+        self.kb.act("capslock")
+        self.assertEqual(self.kb.shift, layout.SHIFT_LOCK)
+
+    def test_capslock_sends_no_keystroke(self):
+        # It locks our own shift rather than pressing a real CapsLock, so the
+        # grid can draw in capitals and closing cannot strand the desktop.
+        self.assertIsNone(self.kb.act("capslock"))
+
+    def test_named_keys(self):
+        for action, key in (("back", "BACKSPACE"), ("enter", "ENTER"),
+                            ("tab", "TAB"), ("left", "LEFT"), ("right", "RIGHT")):
+            with self.subTest(action=action):
+                self.assertEqual(
+                    self.kb.act(action), layout.Emit(protocol.KEY, keys=(key,))
+                )
 
     def test_space_is_a_character(self):
         self.assertEqual(self.kb.act("space"), layout.Emit(protocol.TYPE, text=" "))
@@ -198,19 +296,53 @@ class TestLatchingModifiers(unittest.TestCase):
         }
         self.assertTrue(set(protocol.MODIFIERS) <= actions)
 
-    def test_the_action_row_is_as_wide_as_a_letter_row(self):
-        rows = layout.LAYERS[layout.LETTERS]
-        self.assertEqual(sum(key.width for key in rows[-1]), len(rows[0]))
+    def test_the_modifiers_sit_along_the_bottom(self):
+        bottom = [key.action for key in layout.LETTER_LAYER[-1]]
+        self.assertEqual(bottom[:3], ["ctrl", "super", "alt"])
 
 
 class TestLayers(unittest.TestCase):
     def test_switching_layer_keeps_the_highlight_inside_the_grid(self):
         kb = layout.Keyboard()
-        kb.row = 0
-        kb.col = len(kb.rows[0]) - 1  # far right of a 10-wide row
+        for row in range(len(kb.rows)):
+            for col in range(len(kb.rows[row])):
+                kb.layer, kb.row, kb.col = layout.LETTERS, row, col
+                kb._sync_x()
+                kb.act("layer")
+                with self.subTest(row=row, col=col):
+                    self.assertLess(kb.col, len(kb.rows[kb.row]))
+                    self.assertIsNotNone(kb.current)
+                kb.act("layer")
+
+    def test_switching_layer_does_not_move_the_highlight_sideways(self):
+        # The frame is identical between layers, so a key that exists on both
+        # must stay put -- Backspace jumping mid-word would be maddening.
+        kb = layout.Keyboard()
+        kb.row, kb.col = 0, len(kb.rows[0]) - 1   # backspace
+        kb._sync_x()
+        where = kb.x
         kb.act("layer")
-        self.assertEqual(kb.layer, layout.SYMBOLS)
-        self.assertLess(kb.col, len(kb.rows[kb.row]))
+        self.assertEqual(kb.current.action, "back")
+        self.assertAlmostEqual(kb.x, where)
+
+    def test_a_character_key_lands_under_the_same_point(self):
+        kb = layout.Keyboard()
+        kb.row, kb.col = 2, 1     # 'a', directly after caps
+        kb._sync_x()
+        low, high = layout.SPANS[layout.LETTERS][2][1]
+        kb.act("layer")
+        # The symbols row 2 has 1.5U keys, so the index differs -- but the key
+        # we land on must still cover where the highlight visually was.
+        span_low, span_high = layout.SPANS[layout.SYMBOLS][kb.row][kb.col]
+        self.assertLessEqual(span_low, (low + high) / 2)
+        self.assertGreater(span_high, (low + high) / 2)
+
+    def test_the_toggle_key_says_where_it_goes(self):
+        kb = layout.Keyboard()
+        toggle = kb.rows[0][0]
+        self.assertEqual(kb.label_of(toggle), "?#")
+        kb.act("layer")
+        self.assertEqual(kb.label_of(kb.rows[0][0]), "abc")
 
     def test_layer_toggles_back(self):
         kb = layout.Keyboard()
@@ -492,6 +624,37 @@ class TestConfig(unittest.TestCase):
         for button, action in Config().osk.bindings.items():
             with self.subTest(button=button):
                 self.assertIn(action, protocol.ACTIONS)
+
+    def test_the_default_shortcut_map(self):
+        self.assertEqual(Config().osk.bindings, {
+            "A": "commit", "B": "close", "X": "back", "Y": "space",
+            "START": "enter", "LB": "left", "RB": "right",
+            "LT": "shift", "RT": "layer", "L3": "capslock",
+        })
+
+    def test_the_triggers_are_bindable_here(self):
+        # LT and RT carry shift and the layer toggle, which is only possible
+        # because analogue triggers are translated into buttons. On most pads
+        # they are axes and could not be bound at all before v0.5.0.
+        for button in ("LT", "RT"):
+            with self.subTest(button=button):
+                self.assertIn(button, Config().osk.bindings)
+                self.assertIn(button, buttons.BUTTONS)
+
+    def test_every_action_with_a_shortcut_can_carry_a_badge(self):
+        # The renderer draws a badge by looking the key's action up in the
+        # hints, so an action bound to a button but absent from both layers
+        # would be a shortcut with nowhere on screen to advertise itself.
+        on_grid = {
+            key.action
+            for rows in layout.LAYERS.values() for row in rows for key in row
+            if key.action
+        }
+        # commit and close act on the grid as a whole rather than on one key,
+        # so they are the two the legend line exists for.
+        expected_off_grid = {"commit", "close"}
+        bound = set(Config().osk.bindings.values())
+        self.assertEqual(bound - on_grid, expected_off_grid)
 
 
 class TestTheDaemonNeverImportsTheRenderer(unittest.TestCase):
