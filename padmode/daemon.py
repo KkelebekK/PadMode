@@ -477,12 +477,18 @@ _OSK_STEPS = {
 #: Left-stick directions move the highlight too. The pointer has nothing to
 #: click with while the keyboard is up -- its own shortcuts take all three
 #: mouse buttons -- so the stick is better spent on the grid.
-_OSK_STICK_STEPS = {
-    "LS_UP": "up",
-    "LS_DOWN": "down",
-    "LS_LEFT": "left",
-    "LS_RIGHT": "right",
+#:
+#: Which axis each direction lies on, and which way along it. The stick is read
+#: as a *sector* here rather than as a flick, so a direction has to be able to
+#: name its own axis (see :func:`osk_stick_direction`).
+_OSK_STEP_AXIS: dict[str, tuple[int, int]] = {
+    "left": (buttons.ABS_X, -1),
+    "right": (buttons.ABS_X, 1),
+    "up": (buttons.ABS_Y, -1),
+    "down": (buttons.ABS_Y, 1),
 }
+
+_OSK_OPPOSITE = {"left": "right", "right": "left", "up": "down", "down": "up"}
 
 #: The axes that navigate the grid.
 OSK_STICK_AXES = frozenset({buttons.ABS_X, buttons.ABS_Y})
@@ -556,8 +562,7 @@ def _decide_osk(
             # On the event rather than the tick, and that is not a nicety: a
             # stick let go from full deflection is back past centre in under a
             # frame, so a tick can miss the whole release.
-            _osk_nav_released(state, config, now)
-            ops = _osk_nav_push(state, config, ev_code, now)
+            ops = osk_nav_ops(state, config, now)
             return Decision(osk=ops) if ops else NOTHING
         # The right stick slides the panel, and does so on the tick: a stick
         # held at deflection stops emitting entirely, and a panel that only
@@ -579,80 +584,110 @@ def _decide_osk(
     return NOTHING
 
 
-def osk_nav_ops(state: State, config: Config, now: float) -> tuple[OskOp, ...]:
-    """Steps owed to a direction that is being held. Called on the tick.
+def osk_stick_direction(state: State, config: Config) -> str | None:
+    """Which of the four ways the left stick points now, or None near centre.
 
-    The only place padmode repeats a held direction itself. A bound stick
-    direction elsewhere taps a real key and hands the repeat rate to the
+    A **sector**, not a flick, and that is the whole difference. Elsewhere a
+    stick direction is a bound button: it taps once, then disarms until the
+    stick is seen back at centre, because a stick released from deflection
+    rings past centre and would otherwise tap again the other way.
+
+    On the grid that model is wrong, and rolling the stick in a circle is what
+    exposes it -- the thumb never passes through centre, so the axis that just
+    fired stays disarmed through the next quarter turn. Measured against the
+    old code at 60 Hz: a slow roll produced eleven steps per turn instead of
+    four, and a fast one silently dropped a direction per turn. Both feel like
+    the keyboard ignoring you, which is exactly how it was reported.
+
+    So the stick is asked what it is *pointing at*, every tick, the way a d-pad
+    is asked which way it is held -- and the answer changing is what steps the
+    highlight. Holding a direction still repeats; that clock is
+    :func:`osk_nav_ops`'.
+
+    Two pieces of hysteresis keep a thumb resting on a boundary from
+    chattering: a held direction stays held down to ``NAV_HOLD_RATIO`` of the
+    engage threshold, and it keeps the sector until another direction beats it
+    by a tenth. Neither is enough to make the circle skip, because both are far
+    smaller than a quarter turn.
+    """
+    x = state.sticks.get(buttons.ABS_X, 0.0)
+    y = state.sticks.get(buttons.ABS_Y, 0.0)
+    engage = config.desktop.stick_threshold
+    hold = engage * NAV_HOLD_RATIO
+    dominance = config.osk.stick_dominance
+    nav = state.osk_nav
+    # Only a stick-held direction is sticky; a d-pad reports its own release.
+    held = nav.direction if nav is not None and nav.sign else None
+
+    best: tuple[str, float] | None = None
+    for direction, (axis, sign) in _OSK_STEP_AXIS.items():
+        along = (x if axis == buttons.ABS_X else y) * sign
+        across = abs(y if axis == buttons.ABS_X else x)
+        if direction == held:
+            if along < hold or along < dominance * across * 0.9:
+                continue
+        elif along < engage or along < dominance * across:
+            continue
+        if best is None or along > best[1]:
+            best = (direction, along)
+    return best[0] if best else None
+
+
+def osk_nav_ops(state: State, config: Config, now: float) -> tuple[OskOp, ...]:
+    """Steps the grid is owed right now: a new direction, or a repeat.
+
+    Called from the tick and from every stick event, and the two cannot
+    disagree: the answer is derived from where the stick is, so asking twice in
+    one frame produces one step. The event path exists because a stick let go
+    from full deflection is back past centre in under a frame, and a tick can
+    miss the whole release.
+
+    This is the only place padmode repeats a held direction itself. A bound
+    stick direction elsewhere taps a real key and hands the repeat rate to the
     compositor's autorepeat; here the steps go to our own renderer, so the rate
     is ours to choose and ours to stop.
-
-    A held stick and a held d-pad both sit there emitting nothing, so this is
-    the only clock available -- and the same reason the *release* has to be
-    caught on the event instead.
     """
     if state.mode is not Mode.OSK:
         state.osk_nav = None
         return ()
-    # A stick parked just under the hold threshold emits nothing more and would
-    # otherwise repeat forever. Cheap backstop for the event path.
-    _osk_nav_released(state, config, now)
-    # Pick up a push the event path could not act on, and re-arm an axis that
-    # came home without us seeing it.
-    for axis in sorted(OSK_STICK_AXES):
-        ops = _osk_nav_push(state, config, axis, now)
-        if ops:
-            return ops
+
+    direction = osk_stick_direction(state, config)
+    nav = state.osk_nav
+
+    if direction is None:
+        if nav is not None and nav.sign:
+            # The stick came home. Block the way back for a moment: released
+            # from full deflection it does not glide to centre, it rings --
+            # swinging past and across the far threshold, which would step once
+            # the wrong way. A time window alone cannot bound that (the ring
+            # lasts longer the harder you push), but a window measured from the
+            # release can.
+            axis, sign = _OSK_STEP_AXIS[nav.direction]
+            state.axis_rebound[axis] = (-sign, now + config.desktop.stick_settle)
+            state.osk_nav = None
+    else:
+        axis, sign = _OSK_STEP_AXIS[direction]
+        if nav is not None and nav.sign and direction == _OSK_OPPOSITE[nav.direction]:
+            # A thumb cannot cross centre without passing through it, so this
+            # is the ring being sampled past the far threshold rather than a
+            # push. Same block, taken earlier.
+            state.axis_rebound[axis] = (sign, now + config.desktop.stick_settle)
+            state.osk_nav = None
+            return ()
+        blocked, until = state.axis_rebound.get(axis, (0, 0.0))
+        if sign == blocked and now < until:
+            return ()
+        if nav is None or nav.direction != direction or not nav.sign:
+            state.osk_nav = OskNav(
+                direction, now + config.osk.repeat_delay, axis, sign
+            )
+            return (OskOp("step", direction),)
 
     nav = state.osk_nav
     if nav is None or config.osk.repeat_interval <= 0 or now < nav.due:
         return ()
     nav.due = now + config.osk.repeat_interval
     return (OskOp("step", nav.direction),)
-
-
-def _osk_nav_push(
-    state: State, config: Config, ev_code: int, now: float
-) -> tuple[OskOp, ...]:
-    """One grid step, if this axis has just crossed into a direction.
-
-    Reuses ``_stick_step`` so the grid gets exactly the digestion a bound
-    direction gets -- threshold, diagonal dominance, and disarm-until-recentred
-    -- and the renderer never has to learn what a dead zone is.
-    """
-    value = state.sticks.get(ev_code, 0.0)
-    name = _stick_step(
-        ev_code, value, state, config.desktop, now,
-        lambda n: n in _OSK_STICK_STEPS,
-    )
-    if name is None:
-        return ()
-    direction = _OSK_STICK_STEPS[name]
-    state.osk_nav = OskNav(
-        direction, now + config.osk.repeat_delay, ev_code,
-        buttons.STICK_DIRS[name][1],
-    )
-    return (OskOp("step", direction),)
-
-
-def _osk_nav_released(state: State, config: Config, now: float) -> bool:
-    """Notice a held stick direction being let go. True if it was.
-
-    Blocks the *opposite* direction briefly on the way out: a stick released
-    from a long hold springs back past centre hard enough to cross the far
-    threshold, which would take one step the wrong way. ``axis_settle`` cannot
-    do this job -- a hold outlasts it by definition -- and blocking both signs
-    would make a fast re-push in the same direction vanish.
-    """
-    nav = state.osk_nav
-    if nav is None or not nav.sign:
-        return False
-    held = config.desktop.stick_threshold * NAV_HOLD_RATIO
-    if state.sticks.get(nav.source, 0.0) * nav.sign >= held:
-        return False
-    state.osk_nav = None
-    state.axis_rebound[nav.source] = (-nav.sign, now + config.desktop.stick_settle)
-    return True
 
 
 def osk_move_delta(
@@ -745,8 +780,8 @@ def _stick_step(
             continue
         if sign == blocked and now < until:
             # The spring-back from a direction that was being held, not a push.
-            # See _osk_nav_released: only the opposite sign is ever blocked, so
-            # pushing the same way again still fires immediately.
+            # Only the opposite sign is ever blocked, so pushing the same
+            # way again still fires immediately.
             return None
         if not wanted(name):
             continue

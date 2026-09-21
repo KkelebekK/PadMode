@@ -173,6 +173,21 @@ class OskConfig:
     #: worst a wild push can do is park it in a corner -- and ``recenter`` puts
     #: it back.
     move_speed: float = 900.0
+    #: How far one axis of the left stick must exceed the other before it steps
+    #: the highlight. 1.0 -- a plain "whichever is bigger" -- rather than
+    #: ``desktop.stick_dominance``'s 2.0, and the difference is the whole
+    #: reason this knob exists.
+    #:
+    #: A margin buys something on the desktop, where the same stick chooses
+    #: between two *different* jobs: stepping and scrolling. Doing nothing in
+    #: the ambiguous wedge beats confidently doing the wrong one. On the
+    #: keyboard the stick has one job, so the wedge is bought and never used --
+    #: at 2.0 each direction gets a 53 degree cone and 147 degrees of the
+    #: circle step nowhere, which is felt immediately as directions that do not
+    #: answer. At 1.0 the four cones meet at the diagonals and cover it.
+    #:
+    #: Raise it if the diagonals feel indecisive on your pad.
+    stick_dominance: float = 1.0
     #: Path or soname to preload so gtk4-layer-shell can hook GDK. Empty means
     #: autodetect (:func:`padmode.osk.preload_library`); set it only if the
     #: library lives somewhere we do not look.
@@ -541,6 +556,7 @@ def _parse_osk(table: dict[str, Any]) -> OskConfig:
         {
             "enabled", "position", "height", "auto_open", "preload", "bindings",
             "repeat_delay", "repeat_interval", "move_speed",
+            "stick_dominance",
         },
         "osk",
     )
@@ -574,6 +590,7 @@ def _parse_osk(table: dict[str, Any]) -> OskConfig:
         # Zero is meaningful: hold-to-repeat off, one step per push.
         ("repeat_interval", 0.0, 1.0),
         ("move_speed", 50.0, 20000.0),
+        ("stick_dominance", 1.0, 10.0),
     ):
         if key not in table:
             continue

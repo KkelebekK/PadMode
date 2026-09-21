@@ -796,12 +796,38 @@ class TestTheLeftStickDrivesTheGrid(unittest.TestCase):
         self.push(buttons.ABS_X, 0.0, now=1.0)      # observed near centre
         self.assertTrue(self.push(buttons.ABS_X, 0.95, now=1.1).osk)
 
-    def test_a_diagonal_push_does_not_step_twice(self):
-        # Dominance, also inherited: a mostly-vertical push must not also trip
-        # the horizontal direction.
+    def test_a_diagonal_push_steps_the_dominant_way_only(self):
+        # A mostly-vertical push must not trip the horizontal direction. It
+        # does step *vertically*, which is the sector model showing through:
+        # the stick is asked where it points, not which axis just moved, so a
+        # horizontal event on a stick held up answers "up".
         self.state.sticks[buttons.ABS_Y] = -0.95
         decision = self.push(buttons.ABS_X, 0.65)
-        self.assertFalse(decision.osk)
+        self.assertEqual([op.value for op in decision.osk], ["up"])
+
+    def test_but_a_push_near_the_diagonal_still_steps(self):
+        # What is *not* inherited is the size of the margin. Desktop mode pays
+        # for a wedge where neither direction fires, because there the same
+        # stick chooses between stepping and scrolling and guessing wrong is
+        # worse than doing nothing. The keyboard's stick only navigates, so at
+        # the desktop's 2.0 each direction would get a 53 degree cone and 147
+        # degrees of the circle would step nowhere. Found with a thumb: rolling
+        # the stick around the circle, the highlight stopped answering at the
+        # diagonals while the d-pad was fine.
+        self.state.sticks[buttons.ABS_Y] = -0.65
+        self.assertEqual(self.push(buttons.ABS_X, 0.7).osk[0].value, "right")
+
+    def test_and_raising_the_knob_brings_the_wedge_back(self):
+        # Proof the knob is wired to the grid rather than merely parsed.
+        self.config = parse({"osk": {"stick_dominance": 2.0}})
+        self.state = with_osk(self.config)
+        self.state.axis_ranges = {
+            code: (-32768, 32767)
+            for code in (buttons.ABS_X, buttons.ABS_Y,
+                         buttons.ABS_RX, buttons.ABS_RY)
+        }
+        self.state.sticks[buttons.ABS_Y] = -0.65
+        self.assertFalse(self.push(buttons.ABS_X, 0.7).osk)
 
     def test_the_right_stick_neither_scrolls_nor_tabs(self):
         # It is moving the keyboard instead. A stick cannot do both, and being
@@ -1380,6 +1406,22 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(config.osk.repeat_delay, 0.5)
         self.assertEqual(config.osk.repeat_interval, 0.1)
         self.assertEqual(config.osk.move_speed, 1500.0)
+
+    def test_the_keyboard_has_its_own_dominance_margin(self):
+        # Deliberately different from the desktop's, and the difference is the
+        # point: one job wants the whole circle to answer, two jobs want a
+        # wedge where neither fires.
+        self.assertEqual(Config().osk.stick_dominance, 1.0)
+        self.assertEqual(Config().desktop.stick_dominance, 2.0)
+        self.assertEqual(
+            parse({"osk": {"stick_dominance": 1.5}}).osk.stick_dominance, 1.5
+        )
+
+    def test_a_dominance_below_one_is_refused(self):
+        # Below 1.0 the weaker axis would win, which is not a preference.
+        for value in (0.5, 0, -1, "wide"):
+            with self.subTest(value=value), self.assertRaises(ConfigError):
+                parse({"osk": {"stick_dominance": value}})
 
     def test_nonsense_repeat_and_move_values(self):
         for key, value in (

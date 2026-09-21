@@ -139,6 +139,46 @@ from the middle of the space bar you get `b`, `h`, `y` — and that going down
 past a row of wide keys and back returns you where you started instead of
 dragging the highlight sideways.
 
+### The stick is a sector here, not a flick
+
+Everywhere else in padmode a stick *direction* is a bound button: it taps once
+when it crosses the threshold, then disarms until the stick is seen back near
+centre. That rule is not fussiness — a stick released from full deflection does
+not glide home, it rings, crossing the far threshold hard enough to tap once
+the wrong way — and the keyboard inherited it whole, on the reasoning that the
+grid should get exactly the digestion a bound direction gets.
+
+Rolling the stick in a slow circle is what showed it was the wrong model. Your
+thumb never passes through centre, so the axis that just fired stays disarmed
+through the next quarter turn. Measured against the old code, driving a perfect
+circle at 60 Hz:
+
+| Roll | Old (flick) | New (sector) |
+|---|---|---|
+| 0.5 turns/s | 11 steps per turn | 11 steps per turn |
+| 1 turn/s | 4 steps per turn | 4 steps per turn |
+| 2 turns/s | **a direction dropped every turn** | 4 steps per turn |
+
+So the grid asks a different question, every tick and on every stick event:
+*which way is the stick pointing*, the way a d-pad is asked which way it is
+held. A changed answer steps the highlight; an unchanged one repeats on the
+hold clock. The spring-back block survives, measured from the moment the stick
+comes home rather than from the moment it fired, plus one rule that says a
+thumb cannot cross centre without passing through it — a direction reversing in
+a single sample is the ring, not a push.
+
+The eleven steps per turn at half a turn a second are not a bug: a slow roll
+sits in each sector for 500 ms, and hold-to-travel starts at 350 ms. Holding a
+direction is supposed to travel.
+
+`osk.stick_dominance` is 1.0 where `desktop.stick_dominance` is 2.0, and the
+difference is the same lesson from the other end. A margin is worth paying for
+when the stick chooses between two *different jobs* — stepping or scrolling —
+because doing nothing in the ambiguous wedge beats confidently doing the wrong
+one. On the grid the stick has one job, so at 2.0 each direction gets a 53°
+cone and 147° of the circle steps nowhere. That was the first thing reported,
+before the skipping: directions that do not answer.
+
 ### Badges
 
 Each key carries the pad button that operates it, the way a console keyboard
