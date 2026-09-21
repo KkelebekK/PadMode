@@ -154,17 +154,42 @@ def cmd_metadata(args: argparse.Namespace, config: Config) -> int:
     return heroic.main(args)
 
 
+def _device_verdict(device, chosen_path: str | None, needle: str | None) -> str:
+    """One line saying why this device was taken, or why it was passed over.
+
+    Every device gets a reason, including the one we picked. The bug this
+    exists for -- binding Steam's inert virtual pad and appearing dead with no
+    error anywhere -- was invisible precisely because the listing said which
+    device won and never said why the others lost.
+    """
+    from .input.reader import VIRTUAL_PREFIX, is_virtual
+
+    if device.name.startswith(VIRTUAL_PREFIX):
+        return "skipped: one of padmode's own virtual devices"
+    if needle and needle not in device.name.lower():
+        return f"skipped: name does not contain {needle!r}"
+    if is_virtual(device):
+        if device.path == chosen_path:
+            return ("virtual: published by another program, no hardware "
+                    "behind it -- and nothing else matched")
+        return ("skipped: virtual, published by another program -- a real pad "
+                "outranks it")
+    return f"physical: {device.phys or 'no phys reported'}"
+
+
 def cmd_devices(args: argparse.Namespace, config: Config) -> int:
     """List input devices and show which one we would pick, and why."""
     from evdev import InputDevice, list_devices
 
-    from .input import find_gamepad, looks_like_gamepad
+    from .input import find_gamepad, is_virtual, looks_like_gamepad
+    from .input.reader import _node_key
 
     chosen = find_gamepad(config.device_name, config.device_path)
     chosen_path = chosen.path if chosen else None
+    needle = config.device_name.lower() if config.device_name else None
 
     found = False
-    for path in sorted(list_devices()):
+    for path in sorted(list_devices(), key=_node_key):
         try:
             device = InputDevice(path)
         except OSError as exc:
@@ -175,6 +200,7 @@ def cmd_devices(args: argparse.Namespace, config: Config) -> int:
         found = True
         marker = "==>" if path == chosen_path else "   "
         print(f"{marker} {path:20} {device.name!r}")
+        print(f"    {_device_verdict(device, chosen_path, needle)}")
         if path == chosen_path:
             # Worth saying out loud: "LT does nothing" is otherwise a silent
             # mystery, and which form a pad uses is invisible from outside.
@@ -200,8 +226,22 @@ def cmd_devices(args: argparse.Namespace, config: Config) -> int:
         print()
         print(f"None matched device.name = {config.device_name!r}.")
         return 1
+
     print()
     print("'==>' is the device padmode will use.")
+    print("Real hardware always outranks a virtual device, whatever the event")
+    print("numbers are. Steam publishes a pad named like real hardware for as")
+    print("long as it is running, and that pad never sends an event here.")
+
+    if is_virtual(chosen):
+        print()
+        print("WARNING: the selected device is virtual, so buttons will most")
+        print("likely do nothing. Plug in a real pad, or pin one below.")
+        print("To pin it, put this in", default_path())
+        print(f'\n[device]\npath = "{chosen.path}"')
+        return 1
+
+    print()
     print("To pin it, put this in", default_path())
     print(f'\n[device]\nname = "{chosen.name}"')
     return 0

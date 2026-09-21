@@ -12,7 +12,7 @@ product names in the shipped tool, package, or docs.
 **Status: v0.5.0** (Guide-hold media/volume/mic; uinput virtual
 mouse/keyboard; desktop mode with bindable stick directions; window backends
 and overlay mode with return-to-game; frontend integration and the Heroic
-metadata generator; on-screen keyboard with auto-open; 482 tests). This document is the
+metadata generator; on-screen keyboard with auto-open; 545 tests). This document is the
 contract. If something here is wrong, fix this file in the same change as the
 code.
 
@@ -281,6 +281,23 @@ pytest** — the promise that this project needs no dependencies should hold for
 contributors too, and most distros ship a PEP 668 Python where installing test
 deps is its own chore.
 
+**The tests that drive the real desktop are opt-in.** Creating a uinput
+*gamepad* is harmless — it only gives padmode something to read — but the
+handful of tests that also build padmode's virtual mouse and keyboard emit
+real input: the pointer moves, the screen scrolls, windows alt-tab on whatever
+session is running. On a machine someone is sitting at, that is disruptive
+enough to have been asked about, so they are behind `PADMODE_INTEGRATION=1`
+and skip by default (`tests.drives_the_desktop`, a class-level decorator).
+Before a release, buy the coverage back with:
+
+```bash
+PADMODE_INTEGRATION=1 python -m unittest discover -s tests -t .
+```
+
+The default run still covers discovery, grabbing and the disconnect path via
+`test_integration.py`, which creates a pad but no virtual output. Anything new
+that builds a `VirtualInput` must carry the decorator.
+
 Things the integration tests learned the hard way, all worth keeping:
 
 - A uinput write is dropped unless it is a real **state change** *on an axis or
@@ -292,6 +309,11 @@ Things the integration tests learned the hard way, all worth keeping:
   match the gamepad capability check. The `padmode` name prefix in
   `reader.VIRTUAL_PREFIX` is what stops us reading back our own output — do not
   rename the virtual devices without updating it.
+- **The synthetic pad is itself a uinput device, so device selection must
+  never exclude those outright.** `find_gamepad` *ranks* real hardware above
+  virtual devices (§6.8) rather than filtering virtual ones out — which is what
+  keeps the synthetic pad findable while Steam's inert pad loses to a real one.
+  A filter would have taken the whole device-discovery test strategy with it.
 - **Never identify a virtual device by name, and never by diffing
   `/dev/input`.** A padmode running on the same machine — the maintainer's own,
   during development — has devices with identical names, so tests silently
@@ -384,6 +406,46 @@ Learned the hard way; re-learning them is expensive.
 
    *Numbered 7 rather than inserted in order because §6.1, §6.2, §6.3 and §6.6
    are cited by name from other documents and from the code.*
+
+8. **Steam publishes an inert twin of every pad you connect.**
+   With Steam running — the normal case here, and the joke the repo is named
+   for — connecting a controller also produces a uinput pad called
+   `Microsoft X-Box 360 pad <n>`, with a real 360 pad's capabilities and a USB
+   bus type. It never emits anything. Measured: the twin appears within a
+   second of the pad (creating a synthetic pad reliably produced a second
+   twin), and disappears when the pad is unplugged — it shadows hardware
+   rather than standing in for it.
+   Measured 2026-09-21 on KDE Wayland with Steam idle in the tray, both nodes
+   read at once for 25 seconds and no grab held: the real pad (`event28`)
+   delivered **36558 events**, Steam's (`event256`) delivered **zero**.
+
+   Two separate faults let us bind it. `_candidates()` sorted paths as
+   *strings*, so `event256` came before `event28` and device order was
+   effectively arbitrary above `event9`. And nothing distinguished a live pad
+   from an inert one: the name is identical to real hardware, so no name test
+   can work, and `VIRTUAL_PREFIX` only ever skipped our own devices. The
+   result was total silence — every binding did nothing, with no error
+   anywhere, which is why it went unnoticed.
+
+   The rule is now **parentage, read from sysfs**: a uinput node has no
+   `/sys/class/input/<node>/device/device`, and hardware always has one. It is
+   deliberately *not* either signal that looks sufficient:
+
+   - **an empty `phys`** — true of Steam's pad, but our own virtual devices
+     report `py-evdev-uinput`, python-evdev's default, so every uinput pad
+     built with the library we ourselves use would pass;
+   - **a sysfs path under `/devices/virtual`** — a Bluetooth pad arrives over
+     uhid and is published at
+     `/sys/devices/virtual/misc/uhid/0005:.../input/inputN`, *inside*
+     `/devices/virtual`, so that test rejects every Bluetooth controller.
+     Measured by creating one through `/dev/uhid` rather than assumed.
+
+   Real hardware **outranks** a virtual pad rather than excluding it: the
+   integration tests' synthetic pad is uinput too (§5), and a virtual pad is a
+   better answer than none provided we say so. Landing on one logs a warning
+   and makes `padmode devices` exit 1. A host where the pad in use is
+   legitimately virtual — a Sunshine pad, as in §6.7 — should pin
+   `device.path`, which still wins outright.
 
 ---
 

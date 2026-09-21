@@ -13,6 +13,8 @@ Two rules from CLAUDE.md drive this whole module:
 from __future__ import annotations
 
 import logging
+import os
+import re
 import selectors
 import time
 from collections.abc import Iterator
@@ -40,7 +42,79 @@ TICK = None
 #: never grab our own virtual pad and feed our output back into our input.
 VIRTUAL_PREFIX = "padmode"
 
+#: Where the kernel publishes every input node, and its parentage with it.
+#:
+#: A node created through uinput has no parent device -- the kernel files it
+#: under ``/sys/devices/virtual/input`` and ``<node>/device/device`` does not
+#: exist. Hardware always has a parent: the USB interface, the i2c client, or
+#: the uhid device a Bluetooth pad arrives on. Parentage, not the path: a
+#: Bluetooth pad lives under ``/sys/devices/virtual`` too (see ``is_virtual``).
+SYSFS_INPUT = "/sys/class/input"
+
 Event = tuple[int, int, int]
+
+
+def is_virtual(device: InputDevice) -> bool:
+    """True if this node came from uinput rather than from hardware.
+
+    Steam publishes a virtual twin of every controller you connect, named
+    ``Microsoft X-Box 360 pad <n>``, and on a machine where Steam running is
+    the normal case -- ours, by design -- that twin is the one we kept
+    choosing. It never emits an event, so every binding silently did nothing
+    and no error appeared anywhere.
+
+    Measured, rather than assumed, about the twin: it appears within a second
+    of a pad being connected (creating a synthetic pad reliably produced a
+    second one, ``pad 1``), and it disappears again when that pad is
+    unplugged. So it shadows real hardware rather than standing in for it.
+
+    Measured 2026-09-21, KDE Wayland, Steam idle in the tray, both nodes read
+    at once for 25 seconds with nothing holding a grab: ``event28`` (the real
+    pad, ``phys='usb-0000:05:00.3-1/input0'``) delivered **36558 events**, and
+    ``event256`` (Steam's, ``phys=''``) delivered **zero**.
+
+    The test is the kernel's own statement of parentage, and deliberately not
+    anything the creating process chose for itself. Three weaker signals were
+    checked on the same machine and rejected:
+
+    * **The name.** Steam's pad is named like real hardware. There is nothing
+      to match on, and CLAUDE.md §5 says so already for our own devices.
+    * **An empty ``phys``.** True of Steam's pad, but it is not the rule: our
+      own virtual devices report ``py-evdev-uinput``, which is python-evdev's
+      default, so any uinput pad built with the very library we use would pass
+      the test. An empty ``phys`` is a symptom of Steam's choices, and Steam
+      can change it without telling us.
+    * **A sysfs path under ``/sys/devices/virtual``.** The obvious reading of
+      the rule above, and wrong. Measured by creating a Bluetooth-bus HID pad
+      through ``/dev/uhid``: it is published at
+      ``/sys/devices/virtual/misc/uhid/0005:1234:5678.0021/input/input321`` --
+      *under* ``/devices/virtual``, because uhid is itself a virtual misc
+      device. Matching on the path would reject every Bluetooth controller.
+      It has a parent (the uhid device), so parentage classifies it correctly.
+
+    The inverse error exists but does not reach us: a few real devices also
+    have no parent -- this machine's ``HP WMI hotkeys`` is one -- and none of
+    them are gamepads. If one ever is, ``device.path`` overrides outright.
+
+    Fails open. If sysfs is not mounted we cannot tell, and a device we cannot
+    classify is better treated as real than quietly demoted.
+    """
+    return _is_virtual_node(device.path)
+
+
+def _is_virtual_node(path: str) -> bool:
+    """:func:`is_virtual`, answered from the path alone.
+
+    Kept separate so that ranking never has to open anything. Measured on this
+    machine: reading parentage for all 33 nodes costs **0.6 ms**, while opening
+    each one and asking for its capabilities costs **118 ms** -- and discovery
+    runs again on every reconnect.
+    """
+    node = os.path.basename(os.path.realpath(path))
+    published = os.path.join(SYSFS_INPUT, node)
+    if not os.path.isdir(published):
+        return False
+    return not os.path.exists(os.path.join(published, "device", "device"))
 
 
 def looks_like_gamepad(device: InputDevice) -> bool:
@@ -90,21 +164,48 @@ def _trigger_axes(device: InputDevice) -> dict[int, int]:
     return translated
 
 
-def _candidates() -> Iterator[InputDevice]:
-    """Every readable input device, in stable order."""
-    for path in sorted(list_devices()):
-        try:
-            yield InputDevice(path)
-        except OSError:
-            continue  # raced with an unplug, or we lack permission
+def _node_key(path: str) -> tuple[int, str]:
+    """Sort key ordering event9 before event28, and event28 before event256.
+
+    ``sorted()`` over the raw paths is a *string* sort, so "event256" lands
+    ahead of "event28" because '2' < '8'. Device order was therefore arbitrary
+    above event9, which is how Steam's pad came to be tried first -- though
+    only by accident, since Steam's node could just as easily have been the
+    lower number. The ordering is worth fixing on its own; it is not the fix.
+    """
+    match = re.search(r"(\d+)$", path)
+    return (int(match.group(1)) if match else -1, path)
+
+
+def _ranked_paths() -> list[str]:
+    """Every node path, real hardware first, each group in node order.
+
+    The whole preference lives here, decided from sysfs before a single device
+    is opened -- so the first candidate that matches is already the best one
+    and the search can stop there, exactly as it used to.
+    """
+    physical: list[str] = []
+    virtual: list[str] = []
+    for path in sorted(list_devices(), key=_node_key):
+        (virtual if _is_virtual_node(path) else physical).append(path)
+    return physical + virtual
 
 
 def find_gamepad(name: str | None = None, path: str | None = None) -> InputDevice | None:
     """Locate the gamepad to use.
 
     ``path`` wins outright if set (an explicit override is an explicit
-    override). Otherwise the first capability-matching device is used, filtered
-    by a case-insensitive substring of ``name`` when one is configured.
+    override). Otherwise every capability-matching device is ranked -- **real
+    hardware first, virtual devices only as a fallback**, each group in node
+    order -- and the best one is returned, filtered by a case-insensitive
+    substring of ``name`` when one is configured.
+
+    Ranked rather than filtered, for two reasons. The synthetic pad the
+    integration tests create is itself a uinput device (CLAUDE.md §5), so
+    refusing virtual devices outright would take the project's entire
+    device-discovery test strategy with it. And a virtual pad we probably
+    cannot use is still a better answer than no pad at all -- provided we say
+    so, which is why landing on one is a warning rather than silence.
     """
     if path:
         try:
@@ -117,13 +218,25 @@ def find_gamepad(name: str | None = None, path: str | None = None) -> InputDevic
         return device
 
     needle = name.lower() if name else None
-    for device in _candidates():
-        if device.name.startswith(VIRTUAL_PREFIX):
+    for path in _ranked_paths():
+        try:
+            device = InputDevice(path)
+        except OSError:
+            continue  # raced with an unplug, or we lack permission
+        if (device.name.startswith(VIRTUAL_PREFIX)
+                or not looks_like_gamepad(device)
+                or (needle and needle not in device.name.lower())):
+            # Closed rather than abandoned: discovery runs on every reconnect,
+            # and a leaked descriptor per rejected device adds up for good.
+            device.close()
             continue
-        if not looks_like_gamepad(device):
-            continue
-        if needle and needle not in device.name.lower():
-            continue
+        if _is_virtual_node(path):
+            # Reached only when no real pad matched, since they are ranked
+            # first -- so this is the fallback, and it has to be audible.
+            log.warning(
+                "%s (%r) is a virtual device -- there is no hardware behind "
+                "it, only another program. If no button does anything, that "
+                "is why; run 'padmode devices'.", device.path, device.name)
         return device
     return None
 

@@ -306,6 +306,13 @@ padmode actions   # everything you can bind, and whether its tool is installed
 padmode windows   # the window backend, and whether each overlay can be found
 ```
 
+**If no button does anything, run `padmode devices` first.** With Steam
+running, every controller you connect also gets a virtual twin published by
+Steam, named like a real Xbox controller, that never sends an event. padmode always prefers real hardware
+over a virtual device, and `padmode devices` prints the reason next to every
+pad it found — including why the one it passed over lost. If it reports that
+the pad in use is virtual, it exits non-zero and tells you what to pin.
+
 ### Game libraries
 
 If you use Heroic and a frontend that reads Pegasus metadata, padmode can
