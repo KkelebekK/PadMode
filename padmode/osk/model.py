@@ -1,10 +1,10 @@
-"""The key grid, the highlight, and what pressing a key means.
+"""Grid state: where the highlight is, what shift is doing, and where it sits.
 
-The renderer owns all of this (docs/on-screen-keyboard.md): the layout lives in
-exactly one place, so the highlight and the typed character cannot disagree --
-the worst bug this feature could have. Kept free of GTK so the whole thing is
-testable without a compositor, which is where nearly all of the interesting
-logic can be covered (CLAUDE.md §5).
+Everything the keyboard knows that is not a pixel. Kept apart from
+:mod:`padmode.osk.view` so it can be driven from a test without a compositor,
+which is where nearly all of the interesting logic can be covered
+(CLAUDE.md §5), and apart from :mod:`padmode.osk.keys` because that file is the
+design and this one is the behaviour.
 
 Stdlib only. Imported by the renderer process, never by the daemon.
 """
@@ -13,11 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import protocol
-
-#: Layer names.
-LETTERS = "letters"
-SYMBOLS = "symbols"
+from . import keys, protocol
 
 #: Shift states. One-shot rather than a plain toggle because typing a single
 #: capital is the common case, and a toggle makes it cost two extra presses.
@@ -26,24 +22,6 @@ SYMBOLS = "symbols"
 SHIFT_OFF = "off"
 SHIFT_ONCE = "once"
 SHIFT_LOCK = "lock"
-
-#: Width of every row, in key units. Both layers match, and that is load
-#: bearing twice over: the rows line up visually, and toggling layers cannot
-#: change the surface height -- which matters because a mapped layer surface
-#: only resizes reliably when it *grows* (docs/on-screen-keyboard.md §Sizing).
-ROW_UNITS = 13.0
-
-
-@dataclass(frozen=True)
-class Key:
-    """One cell. Either types a character or performs an action, never both."""
-
-    label: str
-    char: str | None = None
-    action: str | None = None
-    #: Width in key units, as a mechanical keyboard measures them: 1U is a
-    #: letter, 6.25U is the space bar.
-    width: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -58,94 +36,11 @@ class Emit:
     down: bool = False
 
 
-def _chars(row: str, width: float = 1.0) -> tuple[Key, ...]:
-    return tuple(Key(label=ch, char=ch, width=width) for ch in row)
-
-
-# The frame: every key that is not a character. These are shared between the
-# layers by identity, so toggling changes only the middle of the keyboard and
-# nothing a thumb is resting on moves.
-_LAYER = Key(label="?#", action="layer")
-_BACK = Key(label="⌫", action="back", width=2.0)
-_TAB = Key(label="tab", action="tab", width=1.5)
-_CAPS = Key(label="caps", action="capslock", width=1.75)
-_ENTER = Key(label="↵", action="enter", width=2.25)
-_LSHIFT = Key(label="⇧", action="shift", width=2.25)
-#: Narrower than the 2.75U a real 60% gives it: keeping `.` on the bottom row
-#: costs a unit, and the shift you reach for least is the cheapest place to
-#: find it.
-_RSHIFT = Key(label="⇧", action="shift", width=1.75)
-_CTRL = Key(label="ctrl", action="ctrl", width=1.25)
-_WIN = Key(label="win", action="super", width=1.25)
-_ALT = Key(label="alt", action="alt", width=1.25)
-_SPACE = Key(label="space", action="space", width=6.25)
-_LEFT = Key(label="←", action="left", width=1.5)
-_RIGHT = Key(label="→", action="right", width=1.5)
-
-#: Identical on both layers, so the modifiers and the space bar never move.
-_BOTTOM: tuple[Key, ...] = (_CTRL, _WIN, _ALT, _SPACE, _LEFT, _RIGHT)
-
-#: A 60% keyboard, with four deliberate departures: the layer toggle takes
-#: Escape's place, the number row carries no shifted legends, `/` is gone, and
-#: the cursor keys fill the space to the right of the space bar. Familiar
-#: beats clever -- the point of the feature is that you already know where
-#: things are.
-LETTER_LAYER: tuple[tuple[Key, ...], ...] = (
-    (_LAYER, *_chars("1234567890"), _BACK),
-    (_TAB, *_chars("qwertyuiop"), Key(label="\\", char="\\", width=1.5)),
-    (_CAPS, *_chars("asdfghjkl"), _ENTER),
-    (_LSHIFT, *_chars("zxcvbnm,."), _RSHIFT),
-    _BOTTOM,
-)
-
-#: The same frame with the characters swapped. `|` sits where `\` does -- the
-#: same physical key, its shifted meaning. `,` and `.` are repeated here on
-#: purpose: they are wanted constantly while typing symbols, and going back a
-#: layer for a decimal point would be absurd.
-SYMBOL_LAYER: tuple[tuple[Key, ...], ...] = (
-    (_LAYER, *_chars("!@#$%^&*()"), _BACK),
-    (_TAB, *_chars("-_=+[]{};:"), Key(label="|", char="|", width=1.5)),
-    (_CAPS, *_chars("'\"`~<>", width=1.5), _ENTER),
-    (_LSHIFT, *_chars(",./?", width=2.25), _RSHIFT),
-    _BOTTOM,
-)
-
-LAYERS: dict[str, tuple[tuple[Key, ...], ...]] = {
-    LETTERS: LETTER_LAYER,
-    SYMBOLS: SYMBOL_LAYER,
-}
-
-
-def _spans(row: tuple[Key, ...]) -> tuple[tuple[float, float], ...]:
-    """Where each key of a row starts and ends, in key units."""
-    spans, x = [], 0.0
-    for key in row:
-        spans.append((x, x + key.width))
-        x += key.width
-    return tuple(spans)
-
-
-#: Precomputed once: navigation asks "which key is under this point" on every
-#: vertical move, and the layout never changes at runtime.
-SPANS: dict[str, tuple[tuple[tuple[float, float], ...], ...]] = {
-    name: tuple(_spans(row) for row in rows) for name, rows in LAYERS.items()
-}
-
-#: Named keys the grid can send that are not characters.
-_ACTION_KEYS: dict[str, tuple[str, ...]] = {
-    "back": ("BACKSPACE",),
-    "enter": ("ENTER",),
-    "tab": ("TAB",),
-    "left": ("LEFT",),
-    "right": ("RIGHT",),
-}
-
-
 @dataclass
 class Keyboard:
-    """Grid state: which layer, where the highlight is, and shift."""
+    """Which layer, where the highlight is, and shift."""
 
-    layer: str = LETTERS
+    layer: str = keys.LETTERS
     row: int = 1
     #: Column 1, not 0: column 0 of the second row is Tab, and starting on a
     #: letter is friendlier than starting on a modifier.
@@ -156,8 +51,8 @@ class Keyboard:
     #: one-shot like shift: holding Alt while stepping the window switcher, or
     #: Ctrl while clicking, both need the modifier to outlive one keystroke.
     mods: set[str] = field(default_factory=set)
-    #: Set when the last action changed something the renderer must redraw
-    #: beyond the highlight (the layer, or the shift indicator).
+    #: Set when the last action changed something the view must redraw beyond
+    #: the highlight (the layer, or the shift indicator).
     dirty: bool = field(default=False, compare=False)
     #: Remembered horizontal position, in key units. The same idea as a text
     #: editor's desired column: moving up and down preserves it, so travelling
@@ -170,14 +65,14 @@ class Keyboard:
 
     # -- reading -------------------------------------------------------
     @property
-    def rows(self) -> tuple[tuple[Key, ...], ...]:
-        return LAYERS[self.layer]
+    def rows(self) -> tuple[tuple[keys.Key, ...], ...]:
+        return keys.LAYERS[self.layer]
 
     @property
-    def current(self) -> Key:
+    def current(self) -> keys.Key:
         return self.rows[self.row][self.col]
 
-    def label_of(self, key: Key) -> str:
+    def label_of(self, key: keys.Key) -> str:
         """What to draw on a key, honouring shift and the current layer.
 
         Shift only affects letters. Digits keep their labels: the symbols that
@@ -186,19 +81,19 @@ class Keyboard:
         user's layout is not US (:func:`padmode.buttons.keys_for_char`).
         """
         if key.action == "layer":
-            return "abc" if self.layer == SYMBOLS else "?#"
+            return "abc" if self.layer == keys.SYMBOLS else "?#"
         if key.char and self.shift != SHIFT_OFF and key.char.isalpha():
             return key.char.upper()
         return key.label
 
     # -- moving --------------------------------------------------------
     def _sync_x(self) -> None:
-        low, high = SPANS[self.layer][self.row][self.col]
+        low, high = keys.SPANS[self.layer][self.row][self.col]
         self.x = (low + high) / 2
 
     def _under_x(self, row: int) -> int:
         """The key in ``row`` that lies under the remembered position."""
-        spans = SPANS[self.layer][row]
+        spans = keys.SPANS[self.layer][row]
         for index, (low, high) in enumerate(spans):
             if low <= self.x < high:
                 return index
@@ -254,7 +149,7 @@ class Keyboard:
             self.dirty = True
             return None
         if name == "layer":
-            self.layer = SYMBOLS if self.layer == LETTERS else LETTERS
+            self.layer = keys.SYMBOLS if self.layer == keys.LETTERS else keys.LETTERS
             # The frame is identical, so the highlight stays where it looks
             # like it is; only a character key can land on a different index.
             self.col = self._under_x(self.row)
@@ -274,8 +169,8 @@ class Keyboard:
             return Emit(protocol.CLOSED)
         if name == "space":
             return Emit(protocol.TYPE, text=" ")
-        if name in _ACTION_KEYS:
-            return Emit(protocol.KEY, keys=_ACTION_KEYS[name])
+        if name in keys.ACTION_KEYS:
+            return Emit(protocol.KEY, keys=keys.ACTION_KEYS[name])
         if name == "commit":
             return self.press()
         return None
@@ -295,7 +190,7 @@ class Keyboard:
         self.dirty = bool(emits)
         return emits
 
-    def _type(self, key: Key) -> Emit | None:
+    def _type(self, key: keys.Key) -> Emit | None:
         if key.char is None:
             return None
         text = self.label_of(key)
@@ -303,3 +198,54 @@ class Keyboard:
             self.shift = SHIFT_OFF
             self.dirty = True
         return Emit(protocol.TYPE, text=text)
+
+
+# -- where the keyboard sits -------------------------------------------
+# It floats rather than being welded to one edge, so it can be driven out of
+# the way of whatever you are typing into. What comes out of here is a
+# **top-left corner inside the screen's usable area**, which the surface hands
+# to the compositor as a pair of layer-shell margins -- the keyboard is its own
+# surface, so moving it moves the surface.
+#
+# The arithmetic lives here, with the rest of the stdlib-only logic, because
+# the surface cannot be tested without a compositor and this part does not need
+# one (CLAUDE.md §5).
+#
+# ``output`` means the **usable** area, not the monitor's geometry. They differ
+# by whatever the panels reserve, and margins are measured from the usable
+# area: sizing against a 1440-tall monitor with a 34px panel puts the keyboard
+# 34px below the bottom of the screen. Observed, on hardware.
+
+
+def _clamp(value: float, span: float, limit: float) -> float:
+    """Keep a span of ``span`` wholly inside ``0..limit``.
+
+    A panel larger than the output goes to 0 rather than to a negative
+    coordinate: better to lose the far edge off the bottom-right than to have
+    the keys you navigate from start off-screen.
+    """
+    return min(max(value, 0.0), max(0.0, limit - span))
+
+
+def clamp_position(
+    x: float, y: float, panel: tuple[float, float], output: tuple[float, float]
+) -> tuple[float, float]:
+    """Nearest position to ``x, y`` that leaves the whole panel on screen."""
+    return _clamp(x, panel[0], output[0]), _clamp(y, panel[1], output[1])
+
+
+def home_position(
+    panel: tuple[float, float], output: tuple[float, float], edge: str
+) -> tuple[float, float]:
+    """Where the keyboard sits until it is moved, and what ``recenter`` undoes.
+
+    Centred against the configured edge: it is the position that assumes least
+    about where the text field is, which is the same reason the keyboard never
+    reserves space.
+    """
+    return clamp_position(
+        (output[0] - panel[0]) / 2,
+        0.0 if edge == "top" else output[1] - panel[1],
+        panel,
+        output,
+    )

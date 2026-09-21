@@ -65,9 +65,9 @@ def is_frontend(binding: Binding) -> bool:
 
 
 #: Marks a binding as "put the on-screen keyboard up". Like ``frontend`` it is
-#: not an action to run, and unlike ``overlay.<name>`` it is not a mode: the
-#: keyboard is a layer over desktop mode, so the pointer keeps working while it
-#: is up (docs/on-screen-keyboard.md).
+#: not an action to run, and like ``overlay.<name>`` it changes mode -- but it
+#: is a *request* rather than a mode name, because only the daemon knows
+#: whether the renderer actually came up (docs/on-screen-keyboard.md).
 OSK_BINDING = "osk"
 
 
@@ -97,16 +97,18 @@ DEFAULT_DESKTOP_BINDINGS: dict[str, str] = {
     "Y": "osk",
 }
 
-#: What the pad does *while the keyboard is up*. These replace the desktop
-#: bindings for as long as it is on screen; the sticks are untouched, so the
-#: pointer keeps working, which is the point of the keyboard being a layer
-#: rather than a mode.
+#: What the pad does *while the keyboard is up*. This is the whole map, not an
+#: overlay on the desktop one: the keyboard is its own mode, so a button
+#: missing from here does nothing until you put the keyboard away. Both sticks
+#: are taken too -- the left one navigates the grid and the right one slides
+#: the panel around the screen, so it can be pushed off whatever you are
+#: typing into.
 #:
 #: ``A`` commits even though it is left-click in desktop mode: committing a
 #: character is by far the most frequent thing you do while typing, so it gets
 #: the most natural button, and ``B`` puts the keyboard away in one press when
 #: you want to click something. The d-pad is not listed because it navigates
-#: the grid and is not bindable in v1 -- the renderer needs it.
+#: the grid and is not bindable in v1 -- the grid needs it.
 #:
 #: The shoulders move the text cursor and the triggers change what the keys
 #: mean -- one trigger for shift, one for the symbol layer. The triggers are
@@ -123,6 +125,11 @@ DEFAULT_OSK_BINDINGS: dict[str, str] = {
     "LT": "shift",
     "RT": "layer",
     "L3": "capslock",
+    # The stick that moves the panel puts it back, which is where a thumb
+    # already is when it has been pushed somewhere silly. It costs R3's desktop
+    # job (holding Alt) for as long as the keyboard is up; alt-tabbing while
+    # typing is not a thing anyone does, and Alt latches on the grid anyway.
+    "R3": "recenter",
 }
 
 
@@ -131,9 +138,10 @@ class OskConfig:
     """The on-screen keyboard: a separate process the daemon spawns."""
 
     enabled: bool = True
-    #: Which screen edge it sits on. It never reserves space, so it covers
-    #: rather than displaces -- there is no way to know where the text field
-    #: you are typing into is, so the choice is left to the user.
+    #: Which screen edge it starts against, and what ``recenter`` puts it back
+    #: to. It never reserves space, so it covers rather than displaces -- there
+    #: is no way to know where the text field you are typing into is, which is
+    #: also why the right stick can move it out of the way.
     position: str = "bottom"
     #: Share of the screen's height the keyboard should take, in percent. The
     #: width follows from it, since the keys keep their proportions. Height is
@@ -151,6 +159,20 @@ class OskConfig:
     #: application reports its text fields and nothing happens. padmode says so
     #: once at startup rather than leaving you guessing.
     auto_open: bool = True
+    #: How long a navigation direction must be held before the highlight starts
+    #: travelling on its own, in seconds. Held rather than flicked is the
+    #: normal way to cross a keyboard: the grid is 13 keys wide, and flicking
+    #: thirteen times to reach Backspace is what made the first version feel
+    #: stiff.
+    repeat_delay: float = 0.35
+    #: Seconds between steps once it is travelling. 0 turns hold-to-repeat off
+    #: and goes back to one step per push.
+    repeat_interval: float = 0.07
+    #: How fast the right stick slides the whole keyboard, in pixels per
+    #: second at full deflection. The panel is clamped to the screen, so the
+    #: worst a wild push can do is park it in a corner -- and ``recenter`` puts
+    #: it back.
+    move_speed: float = 900.0
     #: Path or soname to preload so gtk4-layer-shell can hook GDK. Empty means
     #: autodetect (:func:`padmode.osk.preload_library`); set it only if the
     #: library lives somewhere we do not look.
@@ -516,7 +538,10 @@ def _parse_osk(table: dict[str, Any]) -> OskConfig:
     """Parse ``[osk]``. Absent is fine; the keyboard is on by default."""
     _reject_unknown(
         table,
-        {"enabled", "position", "height", "auto_open", "preload", "bindings"},
+        {
+            "enabled", "position", "height", "auto_open", "preload", "bindings",
+            "repeat_delay", "repeat_interval", "move_speed",
+        },
         "osk",
     )
     osk = OskConfig()
@@ -543,6 +568,21 @@ def _parse_osk(table: dict[str, Any]) -> OskConfig:
                 "osk.height must be between 8 and 70 percent of screen height"
             )
         osk = replace(osk, height=float(height))
+
+    for key, lo, hi in (
+        ("repeat_delay", 0.05, 2.0),
+        # Zero is meaningful: hold-to-repeat off, one step per push.
+        ("repeat_interval", 0.0, 1.0),
+        ("move_speed", 50.0, 20000.0),
+    ):
+        if key not in table:
+            continue
+        value = table[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(f"osk.{key} must be a number")
+        if not lo <= value <= hi:
+            raise ConfigError(f"osk.{key} must be between {lo} and {hi}")
+        osk = replace(osk, **{key: float(value)})
 
     if "preload" in table:
         preload = table["preload"]

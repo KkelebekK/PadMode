@@ -2,9 +2,9 @@
 
 One JSON object per line, in both directions, over the child's stdin and
 stdout. Chosen over a socket because the renderer's liveness then comes for
-free: it dies, the daemon's read returns EOF, and OSK mode ends without a
-watchdog. A stuck grab is the worst failure this app has (CLAUDE.md §4), so
-the failure path wanting the least machinery wins.
+free: it dies, the daemon's read returns EOF, and the keyboard closes without a
+watchdog. A stuck grab is the worst failure this app has (CLAUDE.md §4), so the
+failure path wanting the least machinery wins.
 
 The renderer's stderr is inherited, so GTK's warnings land in journald with
 everything else and stdout stays a clean channel.
@@ -24,10 +24,16 @@ SHOW = "show"
 #: Unmap the surface, keeping the process alive and warm.
 HIDE = "hide"
 #: One discrete step of the highlight: ``dir`` is up/down/left/right. Discrete
-#: because v1 navigates with the d-pad; if sticks are ever added, the daemon
-#: digests them into these same steps and the renderer never learns about dead
-#: zones (docs/on-screen-keyboard.md).
+#: because the renderer must never see an analogue value: the daemon owns dead
+#: zones, thresholds and the hold-to-repeat clock, and sends only the steps a
+#: d-pad would have produced (docs/on-screen-keyboard.md).
 STEP = "step"
+#: Slide the whole keyboard by ``dx``/``dy`` pixels. Digested the same way
+#: :data:`STEP` is -- the daemon applies the dead zone and the response curve
+#: and sends a distance, so the renderer still never learns what a stick is.
+#: Clamping to the screen is the renderer's, because only it knows how big the
+#: panel and the output are.
+MOVE = "move"
 #: A semantic action: ``name`` is one of :data:`ACTIONS`. The daemon resolves
 #: buttons to actions so the mapping stays in config, where it is bindable.
 ACT = "act"
@@ -57,8 +63,8 @@ CLOSED = "closed"
 FAILED = "failed"
 #: Something took keyboard focus: ``editable`` says whether you could type into
 #: it. Only ever a role and a state -- never what the field contains. The
-#: daemon decides what to do with it, because it owns the flag that routes the
-#: pad's buttons and the two must not disagree about who has them.
+#: daemon decides what to do with it, because entering and leaving the keyboard
+#: is a mode change and only the daemon may make one.
 FOCUS = "focus"
 
 #: Actions a button can be forwarded as. The renderer decides what each does
@@ -73,6 +79,11 @@ ACTIONS = frozenset({
     "capslock",  # lock shift on, rather than a real KEY_CAPSLOCK
     "layer",     # letters <-> symbols
     "close",
+    # Put the keyboard back where it started. The right stick moves it, and a
+    # panel pushed into a corner needs one press to undo rather than a careful
+    # drive back -- the same reason a console keyboard has no free positioning
+    # at all.
+    "recenter",
     # Move the text cursor. Worth pad buttons of their own: correcting a typo
     # otherwise means closing the keyboard to use the pointer.
     "left",

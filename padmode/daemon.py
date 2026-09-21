@@ -108,11 +108,20 @@ class Mode(enum.Enum):
     #: Like DESKTOP, but an app was raised over what was running and we
     #: remember the window to hand focus back to on the way out.
     OVERLAY = "overlay"
+    #: The on-screen keyboard is up and owns the whole pad. Entered from
+    #: DESKTOP or OVERLAY and returns to whichever it came from
+    #: (:attr:`State.osk_return`); never entered from IDLE without passing
+    #: through DESKTOP first, because the keyboard needs the virtual devices.
+    OSK = "osk"
 
 
-#: Modes in which the pad drives the virtual pointer and keyboard. They differ
-#: only in what happens at the edges, so everything in between is shared.
-PAD_MODES = (Mode.DESKTOP, Mode.OVERLAY)
+#: Modes in which we hold the pad exclusively and the tick runs.
+PAD_MODES = (Mode.DESKTOP, Mode.OVERLAY, Mode.OSK)
+
+#: Of those, the ones where the sticks drive the virtual pointer. The keyboard
+#: takes both sticks -- the left one navigates the grid, the right one slides
+#: the panel -- so the pointer is parked for as long as it is up.
+POINTER_MODES = (Mode.DESKTOP, Mode.OVERLAY)
 
 
 class Grab(enum.Enum):
@@ -137,12 +146,35 @@ class VirtualOp:
 class OskOp:
     """Something to do to the on-screen keyboard.
 
-    ``open`` and ``close`` are ours to act on; ``step`` and ``act`` are
-    forwarded to the renderer, which owns the grid and decides what they mean.
+    ``open`` and ``close`` are ours to act on -- each is a mode change, and
+    only the daemon may make one, because only it knows whether the renderer
+    came up. ``step`` and ``act`` are forwarded to the renderer, which owns the
+    grid and decides what they mean.
     """
 
     kind: str
     value: str = ""
+
+
+@dataclass
+class OskNav:
+    """A navigation direction being held, and when it next repeats.
+
+    The clock is the daemon's rather than the renderer's because a stick held
+    at full deflection and a d-pad held down both sit there emitting nothing:
+    there is no second event to drive a repeat off, so it has to come from the
+    tick (docs/on-screen-keyboard.md §Where the repeat clock had to live).
+    """
+
+    direction: str
+    #: Monotonic time of the next step.
+    due: float
+    #: The stick axis or d-pad hat code this came from, so the release of one
+    #: does not cancel a hold on the other.
+    source: int
+    #: Which way the axis was pushed, or 0 for the d-pad -- which reports its
+    #: own release and so needs no deflection watching.
+    sign: int = 0
 
 
 @dataclass
@@ -172,29 +204,32 @@ class State:
     axis_disarmed: set[int] = field(default_factory=set)
     #: Axis code -> time before which it cannot re-arm.
     axis_settle: dict[int, float] = field(default_factory=dict)
+    #: Axis code -> (direction sign to ignore, until when). A stick released
+    #: from a long hold springs back past centre hard enough to cross the
+    #: opposite threshold, and :attr:`axis_settle` cannot cover it: a hold
+    #: outlasts that window by definition. Only the *opposite* sign is blocked,
+    #: so pushing the same way again is never delayed by having let go.
+    axis_rebound: dict[int, tuple[int, float]] = field(default_factory=dict)
     #: Button name -> (release to emit, time to emit it). Holds a release back
     #: briefly so contact bounce can cancel it.
     pending_release: dict[str, tuple[VirtualOp, float]] = field(default_factory=dict)
-    #: The on-screen keyboard is on screen. Not a :class:`Mode`: it is a layer
-    #: over one, valid only while ``mode`` is in :data:`PAD_MODES`. While it is
-    #: set, the d-pad and the buttons bound in ``[osk.bindings]`` belong to the
-    #: keyboard; the sticks still drive the pointer, which is the entire reason
-    #: this is a flag and not a mode.
-    #:
-    #: Set by the daemon rather than by :func:`decide`, unlike ``mode``: only
-    #: the daemon knows whether the renderer actually came up, and a flag that
-    #: says the keyboard is on screen when it is not would steal the d-pad
-    #: with nothing to show for it.
-    osk: bool = False
+    #: Where :data:`Mode.OSK` goes back to when the keyboard closes: the mode it
+    #: was opened from. Deliberately *not* cleared by :meth:`reset_inputs` --
+    #: it is not transient input state, and ``_leave`` reads it to decide
+    #: whether an overlay return is owed.
+    osk_return: Mode = Mode.DESKTOP
+    #: The navigation direction currently held, if any.
+    osk_nav: OskNav | None = None
 
     def reset_inputs(self) -> None:
-        """Forget transient input state when entering or leaving desktop mode."""
+        """Forget transient input state when entering or leaving a mode."""
         self.sticks.clear()
         self.hats.clear()
         self.axis_disarmed.clear()
         self.axis_settle.clear()
+        self.axis_rebound.clear()
         self.pending_release.clear()
-        self.osk = False
+        self.osk_nav = None
 
 
 @dataclass(frozen=True)
@@ -267,7 +302,9 @@ def decide(
             return NOTHING  # a trigger moving, but not across the threshold
         ev_type, ev_code, ev_value = translated
 
-    if state.mode in PAD_MODES:
+    if state.mode is Mode.OSK:
+        return _decide_osk(ev_type, ev_code, ev_value, state, config, now)
+    if state.mode in POINTER_MODES:
         return _decide_desktop(ev_type, ev_code, ev_value, state, config, now)
 
     modifier_code = buttons.code_of(config.modifier)
@@ -316,11 +353,11 @@ def decide(
     if is_osk(binding):
         if not desktop.enabled:
             return NOTHING
-        # The keyboard is a layer over a pad-driven mode, not a mode of its
-        # own, so opening it from idle means entering desktop mode with it
-        # already up: pointer and keyboard both live, which is the state
-        # someone reaching for a keyboard actually wants. It also means there
-        # is exactly one code path that owns the grab.
+        # Enter desktop mode, and ask for the keyboard on top of it. Not
+        # ``mode=Mode.OSK``: the keyboard needs the virtual devices desktop
+        # mode opens, and if the renderer will not come up this is where we
+        # want to be left. The daemon makes the second transition, once it
+        # knows the renderer is running.
         state.mode = Mode.DESKTOP
         state.reset_inputs()
         return Decision(mode=Mode.DESKTOP, osk=(OskOp("open"),))
@@ -377,36 +414,14 @@ def _decide_desktop(
             lo, hi = state.axis_ranges.get(ev_code, buttons.DEFAULT_AXIS_RANGE)
             value = buttons.normalize_axis(ev_value, lo, hi)
             state.sticks[ev_code] = value
-            if state.osk and ev_code in OSK_STICK_AXES:
-                # Same digestion as any bound direction -- threshold, dominance
-                # and the disarm-until-recentred rule -- so the renderer gets
-                # the same discrete steps the d-pad produces and never has to
-                # learn what a dead zone is.
-                name = _stick_step(
-                    ev_code, value, state, desktop, now,
-                    lambda n: n in _OSK_STICK_STEPS,
-                )
-                if name is None:
-                    return NOTHING
-                return Decision(osk=(OskOp("step", _OSK_STICK_STEPS[name]),))
             ops = _stick_direction_ops(ev_code, value, state, desktop, now)
             return Decision(virtual=ops) if ops else NOTHING
 
     if ev_type == buttons.EV_KEY and ev_value == 1:
         if ev_code == buttons.code_of(desktop.exit):
-            # Deliberately unconditional: the exit button always leaves the
-            # mode, even with the keyboard up. It is the one escape that must
-            # never need thinking about, and the keyboard has its own close.
             state.mode = Mode.IDLE
             state.reset_inputs()
             return Decision(grab=Grab.RELEASE, mode=Mode.IDLE)
-
-    if state.osk:
-        handled = _decide_osk(ev_type, ev_code, ev_value, state, config)
-        if handled is not None:
-            return handled
-        # Otherwise this button has no keyboard job, so it keeps its desktop
-        # one. Only the d-pad and the buttons in [osk.bindings] are taken.
 
     # D-pad: press on leaving centre, release on returning, so holding a
     # direction behaves like holding the key.
@@ -451,7 +466,7 @@ def _decide_desktop(
     return NOTHING
 
 
-#: D-pad button name -> the direction the renderer understands.
+#: D-pad button name -> the direction the grid understands.
 _OSK_STEPS = {
     "DPAD_UP": "up",
     "DPAD_DOWN": "down",
@@ -459,9 +474,9 @@ _OSK_STEPS = {
     "DPAD_RIGHT": "right",
 }
 
-#: Left-stick directions move the highlight too, while the keyboard is up. The
-#: pointer has nothing to click with by then -- the keyboard's own shortcuts
-#: take all three mouse buttons -- so the stick is better spent on the grid.
+#: Left-stick directions move the highlight too. The pointer has nothing to
+#: click with while the keyboard is up -- its own shortcuts take all three
+#: mouse buttons -- so the stick is better spent on the grid.
 _OSK_STICK_STEPS = {
     "LS_UP": "up",
     "LS_DOWN": "down",
@@ -469,10 +484,18 @@ _OSK_STICK_STEPS = {
     "LS_RIGHT": "right",
 }
 
-#: The axes that obey the above. The right stick is deliberately untouched: it
-#: still scrolls, and its bound directions still tab between fields. Scrolling
-#: is not cursor control, and neither needs a mouse button.
+#: The axes that navigate the grid.
 OSK_STICK_AXES = frozenset({buttons.ABS_X, buttons.ABS_Y})
+
+#: The axes that slide the whole panel around the screen. This is the only way
+#: to get the keyboard off the field you are typing into, and it costs
+#: scrolling and Tab for as long as it is up.
+OSK_MOVE_AXES = frozenset({buttons.ABS_RX, buttons.ABS_RY})
+
+#: How much of ``stick_threshold`` a held direction must keep to stay held.
+#: Below the firing threshold, because a thumb holding a direction drifts, and
+#: re-arming at exactly the threshold makes a long hold stutter.
+NAV_HOLD_RATIO = 0.75
 
 
 def _decide_osk(
@@ -481,12 +504,15 @@ def _decide_osk(
     ev_value: int,
     state: State,
     config: Config,
-) -> Decision | None:
-    """Route one event to the keyboard, or None if it has no keyboard meaning.
+    now: float,
+) -> Decision:
+    """Route one event while the keyboard is up. It owns the whole pad.
 
-    Returning None rather than NOTHING is the difference between "the keyboard
-    swallowed this" and "the keyboard does not care", and only the second lets
-    the button keep its desktop job.
+    Every button is either bound in ``[osk.bindings]`` or does nothing, which
+    is what makes this a mode rather than a layer over desktop mode. The one
+    exception is the exit button, checked first: it is the escape that must
+    never need thinking about, and a keyboard that could swallow it would be
+    able to strand a user holding a controller.
 
     No debounce here, deliberately. The releases held back in desktop mode
     exist because a stick *click* bounces when the stick is moved (CLAUDE.md
@@ -494,32 +520,159 @@ def _decide_osk(
     traced is exactly the mistake that section was written about. If a key ever
     types twice, trace it first.
     """
-    if ev_type == buttons.EV_ABS and ev_code in (buttons.ABS_HAT0X, buttons.ABS_HAT0Y):
-        if ev_value == 0:
-            return NOTHING  # returning to centre: no auto-repeat in v1
-        name = buttons.resolve(ev_type, ev_code, ev_value)
-        direction = _OSK_STEPS.get(name or "")
-        return Decision(osk=(OskOp("step", direction),)) if direction else NOTHING
+    if ev_type == buttons.EV_KEY and ev_value == 1:
+        if ev_code == buttons.code_of(config.desktop.exit):
+            state.mode = Mode.IDLE
+            state.reset_inputs()
+            return Decision(grab=Grab.RELEASE, mode=Mode.IDLE)
+
+    if ev_type == buttons.EV_ABS:
+        if ev_code in (buttons.ABS_HAT0X, buttons.ABS_HAT0Y):
+            if ev_value == 0:
+                # Only cancel a hold this hat started: the stick may be holding
+                # a direction of its own, and one letting go is not the other.
+                if state.osk_nav is not None and state.osk_nav.source == ev_code:
+                    state.osk_nav = None
+                return NOTHING
+            name = buttons.resolve(ev_type, ev_code, ev_value)
+            direction = _OSK_STEPS.get(name or "")
+            if direction is None:
+                return NOTHING
+            # sign=0: a d-pad reports its own release, so there is no deflection
+            # to watch for it coming home.
+            state.osk_nav = OskNav(
+                direction, now + config.osk.repeat_delay, ev_code
+            )
+            return Decision(osk=(OskOp("step", direction),))
+
+        axis = buttons.stick_axis(ev_code)
+        if axis is None:
+            return NOTHING
+        lo, hi = state.axis_ranges.get(ev_code, buttons.DEFAULT_AXIS_RANGE)
+        # Recorded before any routing decision: the tick reads deflection
+        # directly for the right stick, and for noticing a held one let go.
+        state.sticks[ev_code] = buttons.normalize_axis(ev_value, lo, hi)
+        if ev_code in OSK_STICK_AXES:
+            # On the event rather than the tick, and that is not a nicety: a
+            # stick let go from full deflection is back past centre in under a
+            # frame, so a tick can miss the whole release.
+            _osk_nav_released(state, config, now)
+            ops = _osk_nav_push(state, config, ev_code, now)
+            return Decision(osk=ops) if ops else NOTHING
+        # The right stick slides the panel, and does so on the tick: a stick
+        # held at deflection stops emitting entirely, and a panel that only
+        # moved while the stick was still moving would be unusable.
+        return NOTHING
 
     if ev_type == buttons.EV_KEY and ev_value == 1:
         name = _button_name(ev_code)
         action = config.osk.bindings.get(name or "")
         if action is None:
-            return None
+            # Bound to nothing here, so it does nothing. It does *not* fall
+            # back to its desktop job -- that fallthrough is precisely what
+            # this stopped being.
+            return NOTHING
         if action == "close":
             return Decision(osk=(OskOp("close"),))
         return Decision(osk=(OskOp("act", action),))
 
-    if ev_type == buttons.EV_KEY and ev_value == 0:
-        # Swallow the release of a button the keyboard claimed, so it cannot
-        # arrive at the desktop bindings on its own and release a key that was
-        # never pressed.
-        name = _button_name(ev_code)
-        if name and name in config.osk.bindings:
-            return NOTHING
-        return None
+    return NOTHING
 
-    return None
+
+def osk_nav_ops(state: State, config: Config, now: float) -> tuple[OskOp, ...]:
+    """Steps owed to a direction that is being held. Called on the tick.
+
+    The only place padmode repeats a held direction itself. A bound stick
+    direction elsewhere taps a real key and hands the repeat rate to the
+    compositor's autorepeat; here the steps go to our own renderer, so the rate
+    is ours to choose and ours to stop.
+
+    A held stick and a held d-pad both sit there emitting nothing, so this is
+    the only clock available -- and the same reason the *release* has to be
+    caught on the event instead.
+    """
+    if state.mode is not Mode.OSK:
+        state.osk_nav = None
+        return ()
+    # A stick parked just under the hold threshold emits nothing more and would
+    # otherwise repeat forever. Cheap backstop for the event path.
+    _osk_nav_released(state, config, now)
+    # Pick up a push the event path could not act on, and re-arm an axis that
+    # came home without us seeing it.
+    for axis in sorted(OSK_STICK_AXES):
+        ops = _osk_nav_push(state, config, axis, now)
+        if ops:
+            return ops
+
+    nav = state.osk_nav
+    if nav is None or config.osk.repeat_interval <= 0 or now < nav.due:
+        return ()
+    nav.due = now + config.osk.repeat_interval
+    return (OskOp("step", nav.direction),)
+
+
+def _osk_nav_push(
+    state: State, config: Config, ev_code: int, now: float
+) -> tuple[OskOp, ...]:
+    """One grid step, if this axis has just crossed into a direction.
+
+    Reuses ``_stick_step`` so the grid gets exactly the digestion a bound
+    direction gets -- threshold, diagonal dominance, and disarm-until-recentred
+    -- and the renderer never has to learn what a dead zone is.
+    """
+    value = state.sticks.get(ev_code, 0.0)
+    name = _stick_step(
+        ev_code, value, state, config.desktop, now,
+        lambda n: n in _OSK_STICK_STEPS,
+    )
+    if name is None:
+        return ()
+    direction = _OSK_STICK_STEPS[name]
+    state.osk_nav = OskNav(
+        direction, now + config.osk.repeat_delay, ev_code,
+        buttons.STICK_DIRS[name][1],
+    )
+    return (OskOp("step", direction),)
+
+
+def _osk_nav_released(state: State, config: Config, now: float) -> bool:
+    """Notice a held stick direction being let go. True if it was.
+
+    Blocks the *opposite* direction briefly on the way out: a stick released
+    from a long hold springs back past centre hard enough to cross the far
+    threshold, which would take one step the wrong way. ``axis_settle`` cannot
+    do this job -- a hold outlasts it by definition -- and blocking both signs
+    would make a fast re-push in the same direction vanish.
+    """
+    nav = state.osk_nav
+    if nav is None or not nav.sign:
+        return False
+    held = config.desktop.stick_threshold * NAV_HOLD_RATIO
+    if state.sticks.get(nav.source, 0.0) * nav.sign >= held:
+        return False
+    state.osk_nav = None
+    state.axis_rebound[nav.source] = (-nav.sign, now + config.desktop.stick_settle)
+    return True
+
+
+def osk_move_delta(
+    state: State, config: Config, dt: float
+) -> tuple[float, float]:
+    """How far to slide the panel this tick, in pixels.
+
+    Deliberately the pointer's dead zone and response curve: a keyboard that
+    accelerated differently from the cursor would feel like a different device
+    in the same hand.
+    """
+    if state.mode is not Mode.OSK:
+        return (0.0, 0.0)
+    x, y = _vector_response(
+        state.sticks.get(buttons.ABS_RX, 0.0),
+        state.sticks.get(buttons.ABS_RY, 0.0),
+        config.desktop,
+    )
+    speed = config.osk.move_speed * dt
+    return (x * speed, y * speed)
 
 
 def pending_release_ops(state: State, now: float) -> tuple[VirtualOp, ...]:
@@ -586,9 +739,15 @@ def _stick_step(
     ):
         return None
 
+    blocked, until = state.axis_rebound.get(ev_code, (0, 0.0))
     for name, sign in ((pair[0], -1), (pair[1], 1)):
         if value * sign < engage:
             continue
+        if sign == blocked and now < until:
+            # The spring-back from a direction that was being held, not a push.
+            # See _osk_nav_released: only the opposite sign is ever blocked, so
+            # pushing the same way again still fires immediately.
+            return None
         if not wanted(name):
             continue
         state.axis_disarmed.add(ev_code)
@@ -669,14 +828,12 @@ def pointer_delta(
     Stick axes are negative upwards, and so are ``REL_Y`` and an upward scroll,
     so no axis needs inverting.
 
-    While the on-screen keyboard is up the left stick is treated as claimed:
-    it is driving the grid instead, and there is nothing left to click with
-    anyway. The wheel is untouched -- scrolling needs no mouse button.
+    Only called in :data:`POINTER_MODES`. The keyboard is its own mode and owns
+    both sticks, so there is no branch here for it -- the tick simply does not
+    ask.
     """
     desktop = config.desktop
     claimed = claimed_axes(desktop)
-    if state.osk:
-        claimed = claimed | OSK_STICK_AXES
 
     def axis(code: int) -> float:
         # An axis bound to a key direction has given up its analogue job.
@@ -870,7 +1027,13 @@ class Daemon:
     def _handle(self, ev_type: int, ev_code: int, ev_value: int) -> None:
         self._state.axis_ranges = self._reader.axis_ranges
         self._state.trigger_axes = self._reader.trigger_axes
+        # Resolved through the return mode, so the keyboard is invisible to the
+        # entering/leaving comparison below: desktop -> OSK -> desktop is not a
+        # mode entry, and leaving OSK that was opened over an overlay still
+        # owes the overlay its return.
         was = self._state.mode
+        if was is Mode.OSK:
+            was = self._state.osk_return
         decision = decide(
             ev_type, ev_code, ev_value, self._state, self._config, time.monotonic()
         )
@@ -917,7 +1080,19 @@ class Daemon:
         self._pump_windows(now)
         if self._state.mode not in PAD_MODES or self._virtual is None:
             return
+        # In every pad mode, including OSK: while the keyboard is *down*, this
+        # is what polls for the text field that would open it.
         self._pump_osk()
+        if self._state.mode is Mode.OSK:
+            # The keyboard's own two continuous jobs. Nothing else runs: it
+            # owns both sticks, so there is no pointer to move and no bound
+            # stick direction that could still be live.
+            for op in osk_nav_ops(self._state, self._config, now):
+                self._apply_osk(op)
+            mx, my = osk_move_delta(self._state, self._config, TICK_INTERVAL)
+            if (mx or my) and self._osk is not None:
+                self._osk.move(mx, my)
+            return
         dx, dy, sx, sy = pointer_delta(self._state, self._config, TICK_INTERVAL)
         self._virtual.move(dx, dy)
         self._virtual.scroll(sx, sy)
@@ -939,7 +1114,10 @@ class Daemon:
                 # asset: the only way to tell you entering a field apart from
                 # an application focusing one by itself.
                 self._clicked_at = time.monotonic()
-                if self._config.osk.auto_open and not self._state.osk:
+                if (
+                    self._config.osk.auto_open
+                    and self._state.mode is not Mode.OSK
+                ):
                     self._focus_check_at = self._clicked_at + FOCUS_CHECK_DELAY
             self._virtual.click(op.codes[0], op.pressed)
         elif op.kind == "key":
@@ -994,12 +1172,29 @@ class Daemon:
             self._osk.start()
 
     def _stop_osk(self) -> None:
-        self._state.osk = False
+        """Take the keyboard off screen and kill the renderer.
+
+        For leaving a pad mode altogether, so it does not put the mode back the
+        way :meth:`_leave_osk` does -- the caller is on its way to IDLE.
+        """
+        self._leave_osk()
         self._osk_auto = False
         self._focus_check_at = None
         self._release_osk_mods()
         if self._osk is not None:
             self._osk.stop()
+
+    def _leave_osk(self) -> None:
+        """Go back to the mode the keyboard was opened from.
+
+        The one place the OSK mode ends, so every way out of it -- the close
+        button, the renderer dying, the renderer saying it cannot run -- lands
+        in the same state. Resetting the inputs is what stops a direction still
+        held on the way out from immediately arrowing through the desktop.
+        """
+        if self._state.mode is Mode.OSK:
+            self._state.mode = self._state.osk_return
+            self._state.reset_inputs()
 
     def _release_osk_mods(self) -> None:
         """Let go of every modifier the keyboard latched.
@@ -1020,7 +1215,7 @@ class Daemon:
         if op.kind == "close":
             self._close_osk()
             return
-        if not self._state.osk or self._osk is None:
+        if self._state.mode is not Mode.OSK or self._osk is None:
             return
         if op.kind == "step":
             self._osk.step(op.value)
@@ -1029,13 +1224,29 @@ class Daemon:
             self._osk.act(op.value)
 
     def _open_osk(self, auto: bool = False) -> None:
-        if self._state.osk:
+        """Put the keyboard up, and enter its mode if it really came up.
+
+        The only writer of ``Mode.OSK``. :func:`decide` asks for the keyboard
+        but does not take the mode itself, because only here do we know whether
+        the renderer is running -- and unlike every other refused transition
+        the right landing is *not* IDLE (``_abort``): a keyboard that will not
+        draw should leave you in desktop mode with a working pointer, not on
+        your own holding a controller.
+        """
+        if self._state.mode is Mode.OSK:
+            return
+        if self._state.mode not in POINTER_MODES:
             return
         if self._osk is None or not self._osk.start():
             log.info("no on-screen keyboard in this session")
             return
         self._osk.show(self._osk_hints())
-        self._state.osk = True
+        self._state.osk_return = self._state.mode
+        self._state.mode = Mode.OSK
+        # A direction held while it opens must not immediately travel across
+        # the grid, and a stick already deflected must not fling the panel into
+        # a corner before the user has seen it.
+        self._state.reset_inputs()
         self._osk_auto = auto
         # Start watching the field that caused this, so we notice it going
         # away. Only for an automatic opening: one you asked for stays.
@@ -1048,13 +1259,13 @@ class Daemon:
         # release arrives as a keyboard button and is swallowed, leaving
         # BTN_LEFT down across the entire desktop. Nothing short of leaving the
         # mode clears that, not even a physical mouse. The same reasoning as
-        # the release in `_leave`, for the same reason.
+        # the release in `_leave`, for the same reason. (The debounced releases
+        # that would have flushed it went with `reset_inputs` above.)
         if self._virtual is not None:
             self._virtual.release_all()
-        self._state.pending_release.clear()
 
     def _close_osk(self) -> None:
-        self._state.osk = False
+        self._leave_osk()
         self._osk_auto = False
         self._focus_check_at = None
         if self._osk is not None:
@@ -1072,22 +1283,23 @@ class Daemon:
         *and* parks the pointer, leaving the user worse off than with no
         keyboard at all.
         """
+        up = self._state.mode is Mode.OSK
         log.debug(
             "focus: editable=%s osk=%s auto=%s since_click=%.2fs",
-            editable, self._state.osk, self._osk_auto,
+            editable, up, self._osk_auto,
             time.monotonic() - self._clicked_at,
         )
         if not self._config.osk.auto_open or self._state.mode not in PAD_MODES:
             return
         if editable:
-            if self._state.osk:
+            if up:
                 return
             if time.monotonic() - self._clicked_at > AUTO_OPEN_AFTER_CLICK:
                 # Focus moved for some other reason: an application starting,
                 # a dialog opening, a window closing. Not our business.
                 return
             self._open_osk(auto=True)
-        elif self._state.osk and self._osk_auto:
+        elif up and self._osk_auto:
             self._close_osk()
 
     def _osk_hints(self) -> dict[str, str]:
@@ -1114,17 +1326,18 @@ class Daemon:
             # or was opened by hand, there is nothing to watch.
             self._focus_check_at = (
                 time.monotonic() + FIELD_CHECK_INTERVAL
-                if self._state.osk and self._osk_auto
+                if self._state.mode is Mode.OSK and self._osk_auto
                 else None
             )
         for kind, fields in self._osk.poll():
             self._handle_osk(kind, fields)
-        if self._state.osk and not self._osk.alive:
-            # Risk 4: the renderer is gone while the pad is grabbed. Leaving
-            # OSK is all that is needed -- the grab belongs to the mode, not to
-            # the keyboard, so desktop mode carries on with a working pointer.
+        if self._state.mode is Mode.OSK and not self._osk.alive:
+            # Risk 4: the renderer is gone while the pad is grabbed. Going back
+            # to the mode underneath is all that is needed -- the grab belongs
+            # to the mode, not to the keyboard, so desktop mode carries on with
+            # a working pointer.
             log.warning("the on-screen keyboard exited; carrying on without it")
-            self._state.osk = False
+            self._leave_osk()
             self._release_osk_mods()
 
     def _handle_osk(self, kind: str, fields: dict) -> None:
@@ -1169,7 +1382,7 @@ class Daemon:
         elif kind == osk_protocol.FOCUS:
             self._focus_changed(bool(fields.get("editable")))
         elif kind == osk_protocol.CLOSED:
-            self._state.osk = False
+            self._leave_osk()
             self._osk_auto = False
             self._release_osk_mods()
         elif kind == osk_protocol.FAILED:

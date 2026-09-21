@@ -410,8 +410,12 @@ padmode/
   metadata/steam.py         # *v0.6*, specified in docs/
   osk/protocol.py           # line-JSON messages; stdlib, imported by both
   osk/client.py             # the daemon's end: spawn, talk, bury. stdlib
-  osk/layout.py             # the grid, navigation and shift. stdlib
-  osk/renderer.py           # GTK4 + layer-shell. Never imported by the daemon
+  osk/keys.py               # the grid: what is on it, how wide. stdlib
+  osk/model.py              # navigation, shift, and where the panel may sit. stdlib
+  osk/view.py               # the widgets, the CSS, and how big a key is. GTK4
+  osk/surface.py            # the layer surface: mapping, measuring, margins
+  osk/focus.py              # AT-SPI watcher, for auto-open
+  osk/app.py                # wires the four together. Never imported by the daemon
   osk/__main__.py           # `python -m padmode.osk`
   modes/                    # *later* split out of daemon.py when it earns it
 packaging/                  # udev rule, systemd units; *PKGBUILD*

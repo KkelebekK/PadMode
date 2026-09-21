@@ -1,9 +1,9 @@
 """The on-screen keyboard, without a compositor.
 
-Everything here runs in CI. The renderer's GTK half cannot be, so the parts
-that *can* be were deliberately kept out of it: the grid, the navigation rules
-and the message framing are all plain data structures, and the daemon's half
-talks to a pipe it is handed rather than one it opens.
+Everything here runs in CI. The GTK half cannot be, so the parts that *can* be
+were deliberately kept out of it: the grid, the navigation rules and the
+message framing are all plain data structures, and the daemon's half talks to a
+pipe it is handed rather than one it opens.
 
 The last class is the load-bearing one. CLAUDE.md §2 says a missing GUI toolkit
 disables one feature and never stops the daemon starting -- which is only true
@@ -21,8 +21,16 @@ from unittest import mock
 
 from padmode import buttons
 from padmode.config import Config, ConfigError, OskConfig, parse
-from padmode.daemon import Mode, State, decide, pointer_delta
-from padmode.osk import layout, protocol
+from padmode.daemon import (
+    Mode,
+    State,
+    decide,
+    osk_move_delta,
+    osk_nav_ops,
+    pointer_delta,
+    stick_tick_ops,
+)
+from padmode.osk import keys, model, protocol
 from padmode.osk.client import OskClient
 
 REPO = Path(__file__).resolve().parent.parent
@@ -47,10 +55,11 @@ def in_desktop(config=None):
     return state
 
 
-def with_osk(config=None):
-    """Desktop mode with the keyboard up. The flag is the daemon's to set."""
+def with_osk(config=None, over=Mode.DESKTOP):
+    """The keyboard up over ``over``. The transition is the daemon's to make."""
     state = in_desktop(config)
-    state.osk = True
+    state.osk_return = over
+    state.mode = Mode.OSK
     return state
 
 
@@ -61,15 +70,15 @@ class TestTheGridShape(unittest.TestCase):
         # Not cosmetic. Rows that disagree would not line up, and a layer that
         # changed the surface height would hit the resize bug from v0.5: a
         # mapped layer surface only propagates a size change when it *grows*.
-        for name, rows in layout.LAYERS.items():
+        for name, rows in keys.LAYERS.items():
             for index, row in enumerate(rows):
                 with self.subTest(layer=name, row=index):
                     self.assertAlmostEqual(
-                        sum(key.width for key in row), layout.ROW_UNITS
+                        sum(key.width for key in row), keys.ROW_UNITS
                     )
 
     def test_both_layers_have_the_same_number_of_rows(self):
-        counts = {len(rows) for rows in layout.LAYERS.values()}
+        counts = {len(rows) for rows in keys.LAYERS.values()}
         self.assertEqual(len(counts), 1)
 
     def test_the_frame_keys_do_not_move_between_layers(self):
@@ -80,20 +89,19 @@ class TestTheGridShape(unittest.TestCase):
                 [(k.action, k.width) for k in row if k.action]
                 for row in rows
             ]
-        letters, symbols = layout.LETTER_LAYER, layout.SYMBOL_LAYER
-        self.assertEqual(frame(letters), frame(symbols))
+        self.assertEqual(frame(keys.LETTER_LAYER), frame(keys.SYMBOL_LAYER))
 
     def test_the_layer_toggle_sits_where_escape_would(self):
-        self.assertEqual(layout.LETTER_LAYER[0][0].action, "layer")
+        self.assertEqual(keys.LETTER_LAYER[0][0].action, "layer")
 
     def test_the_cursor_keys_are_beside_the_space_bar(self):
-        bottom = layout.LETTER_LAYER[-1]
+        bottom = keys.LETTER_LAYER[-1]
         self.assertEqual([k.action for k in bottom][-3:], ["space", "left", "right"])
 
 
 class TestNavigation(unittest.TestCase):
     def setUp(self):
-        self.kb = layout.Keyboard()
+        self.kb = model.Keyboard()
 
     def test_starts_on_a_letter(self):
         # Column 0 of that row is Tab, so the default column is 1.
@@ -147,7 +155,7 @@ class TestNavigation(unittest.TestCase):
 
     def test_every_position_lands_on_a_real_key(self):
         # Rows span the full width with no gaps, so no move can fall off one.
-        for layer in layout.LAYERS:
+        for layer in keys.LAYERS:
             self.kb.layer = layer
             for row in range(len(self.kb.rows)):
                 for col in range(len(self.kb.rows[row])):
@@ -164,29 +172,29 @@ class TestNavigation(unittest.TestCase):
 
 class TestTypingAndShift(unittest.TestCase):
     def setUp(self):
-        self.kb = layout.Keyboard()
+        self.kb = model.Keyboard()
 
     def test_pressing_a_letter_types_it(self):
         emit = self.kb.press()
-        self.assertEqual(emit, layout.Emit(protocol.TYPE, text="q"))
+        self.assertEqual(emit, model.Emit(protocol.TYPE, text="q"))
 
     def test_shift_applies_to_one_letter_then_clears(self):
         self.kb.act("shift")
         self.assertEqual(self.kb.press().text, "Q")
-        self.assertEqual(self.kb.shift, layout.SHIFT_OFF)
+        self.assertEqual(self.kb.shift, model.SHIFT_OFF)
         self.assertEqual(self.kb.press().text, "q")
 
     def test_shift_twice_locks(self):
         self.kb.act("shift")
         self.kb.act("shift")
-        self.assertEqual(self.kb.shift, layout.SHIFT_LOCK)
+        self.assertEqual(self.kb.shift, model.SHIFT_LOCK)
         self.assertEqual(self.kb.press().text, "Q")
         self.assertEqual(self.kb.press().text, "Q")
 
     def test_shift_a_third_time_turns_it_off(self):
         for _ in range(3):
             self.kb.act("shift")
-        self.assertEqual(self.kb.shift, layout.SHIFT_OFF)
+        self.assertEqual(self.kb.shift, model.SHIFT_OFF)
 
     def test_shift_does_not_change_digits(self):
         self.kb.row, self.kb.col = 0, 1   # column 0 is the layer toggle
@@ -198,19 +206,19 @@ class TestTypingAndShift(unittest.TestCase):
     def test_capslock_locks_shift_outright(self):
         # One press, not the two that shift's off -> once -> lock would need.
         self.kb.act("capslock")
-        self.assertEqual(self.kb.shift, layout.SHIFT_LOCK)
+        self.assertEqual(self.kb.shift, model.SHIFT_LOCK)
         self.assertEqual(self.kb.press().text, "Q")
         self.assertEqual(self.kb.press().text, "Q")
 
     def test_capslock_again_turns_it_off(self):
         self.kb.act("capslock")
         self.kb.act("capslock")
-        self.assertEqual(self.kb.shift, layout.SHIFT_OFF)
+        self.assertEqual(self.kb.shift, model.SHIFT_OFF)
 
     def test_capslock_clears_a_one_shot_shift(self):
         self.kb.act("shift")
         self.kb.act("capslock")
-        self.assertEqual(self.kb.shift, layout.SHIFT_LOCK)
+        self.assertEqual(self.kb.shift, model.SHIFT_LOCK)
 
     def test_capslock_sends_no_keystroke(self):
         # It locks our own shift rather than pressing a real CapsLock, so the
@@ -222,16 +230,16 @@ class TestTypingAndShift(unittest.TestCase):
                             ("tab", "TAB"), ("left", "LEFT"), ("right", "RIGHT")):
             with self.subTest(action=action):
                 self.assertEqual(
-                    self.kb.act(action), layout.Emit(protocol.KEY, keys=(key,))
+                    self.kb.act(action), model.Emit(protocol.KEY, keys=(key,))
                 )
 
     def test_space_is_a_character(self):
-        self.assertEqual(self.kb.act("space"), layout.Emit(protocol.TYPE, text=" "))
+        self.assertEqual(self.kb.act("space"), model.Emit(protocol.TYPE, text=" "))
 
     def test_every_character_on_both_layers_can_be_typed(self):
         # The grid promising a character the virtual keyboard cannot send is
         # the one bug this feature must not have.
-        for name, rows in layout.LAYERS.items():
+        for name, rows in keys.LAYERS.items():
             for row in rows:
                 for key in row:
                     if key.char is None:
@@ -245,11 +253,11 @@ class TestLatchingModifiers(unittest.TestCase):
     """Ctrl/Alt/Super hold until pressed again, unlike shift."""
 
     def setUp(self):
-        self.kb = layout.Keyboard()
+        self.kb = model.Keyboard()
 
     def test_pressing_a_modifier_holds_it_down(self):
         emit = self.kb.act("super")
-        self.assertEqual(emit, layout.Emit(protocol.HOLD, keys=("LEFTMETA",), down=True))
+        self.assertEqual(emit, model.Emit(protocol.HOLD, keys=("LEFTMETA",), down=True))
         self.assertIn("super", self.kb.mods)
 
     def test_pressing_it_again_lets_it_up(self):
@@ -292,21 +300,21 @@ class TestLatchingModifiers(unittest.TestCase):
         # Bindable to pad buttons too, but nothing should *require* memorising
         # a shortcut.
         actions = {
-            key.action for row in layout.LAYERS[layout.LETTERS] for key in row
+            key.action for row in keys.LAYERS[keys.LETTERS] for key in row
         }
         self.assertTrue(set(protocol.MODIFIERS) <= actions)
 
     def test_the_modifiers_sit_along_the_bottom(self):
-        bottom = [key.action for key in layout.LETTER_LAYER[-1]]
+        bottom = [key.action for key in keys.LETTER_LAYER[-1]]
         self.assertEqual(bottom[:3], ["ctrl", "super", "alt"])
 
 
 class TestLayers(unittest.TestCase):
     def test_switching_layer_keeps_the_highlight_inside_the_grid(self):
-        kb = layout.Keyboard()
+        kb = model.Keyboard()
         for row in range(len(kb.rows)):
             for col in range(len(kb.rows[row])):
-                kb.layer, kb.row, kb.col = layout.LETTERS, row, col
+                kb.layer, kb.row, kb.col = keys.LETTERS, row, col
                 kb._sync_x()
                 kb.act("layer")
                 with self.subTest(row=row, col=col):
@@ -317,7 +325,7 @@ class TestLayers(unittest.TestCase):
     def test_switching_layer_does_not_move_the_highlight_sideways(self):
         # The frame is identical between layers, so a key that exists on both
         # must stay put -- Backspace jumping mid-word would be maddening.
-        kb = layout.Keyboard()
+        kb = model.Keyboard()
         kb.row, kb.col = 0, len(kb.rows[0]) - 1   # backspace
         kb._sync_x()
         where = kb.x
@@ -326,29 +334,29 @@ class TestLayers(unittest.TestCase):
         self.assertAlmostEqual(kb.x, where)
 
     def test_a_character_key_lands_under_the_same_point(self):
-        kb = layout.Keyboard()
+        kb = model.Keyboard()
         kb.row, kb.col = 2, 1     # 'a', directly after caps
         kb._sync_x()
-        low, high = layout.SPANS[layout.LETTERS][2][1]
+        low, high = keys.SPANS[keys.LETTERS][2][1]
         kb.act("layer")
         # The symbols row 2 has 1.5U keys, so the index differs -- but the key
         # we land on must still cover where the highlight visually was.
-        span_low, span_high = layout.SPANS[layout.SYMBOLS][kb.row][kb.col]
+        span_low, span_high = keys.SPANS[keys.SYMBOLS][kb.row][kb.col]
         self.assertLessEqual(span_low, (low + high) / 2)
         self.assertGreater(span_high, (low + high) / 2)
 
     def test_the_toggle_key_says_where_it_goes(self):
-        kb = layout.Keyboard()
+        kb = model.Keyboard()
         toggle = kb.rows[0][0]
         self.assertEqual(kb.label_of(toggle), "?#")
         kb.act("layer")
         self.assertEqual(kb.label_of(kb.rows[0][0]), "abc")
 
     def test_layer_toggles_back(self):
-        kb = layout.Keyboard()
+        kb = model.Keyboard()
         kb.act("layer")
         kb.act("layer")
-        self.assertEqual(kb.layer, layout.LETTERS)
+        self.assertEqual(kb.layer, keys.LETTERS)
 
 
 class TestProtocol(unittest.TestCase):
@@ -478,6 +486,16 @@ class TestClient(unittest.TestCase):
         client.stop()
         client.show({})  # must be a no-op, not an exception
         client.step("up")
+        client.move(1.0, 2.0)
+
+    def test_a_move_carries_both_distances(self):
+        client, proc = self.client()
+        client.move(12.34, -5.0)
+        kind, fields = protocol.decode(proc.stdin.written)
+        self.assertEqual(kind, protocol.MOVE)
+        # Rounded: the surface keeps the remainder, and the tick sends 60 of
+        # these a second while the stick is pushed.
+        self.assertEqual((fields["dx"], fields["dy"]), (12.3, -5.0))
 
     def test_disabled_never_starts(self):
         client = OskClient(OskConfig(enabled=False), spawn=_no_spawn)
@@ -495,7 +513,11 @@ def _no_spawn(*args, **kwargs):
 
 
 class TestRouting(unittest.TestCase):
-    """What the pad does while the keyboard is up."""
+    """What the pad does while the keyboard is up.
+
+    It is a mode, so the answer is "whatever ``[osk.bindings]`` says, and
+    nothing otherwise". The one exception is the exit button.
+    """
 
     def setUp(self):
         self.config = Config()
@@ -504,6 +526,14 @@ class TestRouting(unittest.TestCase):
         state = in_desktop(self.config)
         decision = decide(KEY, Y, 1, state, self.config)
         self.assertEqual([op.kind for op in decision.osk], ["open"])
+
+    def test_asking_for_it_does_not_take_the_mode(self):
+        # Only the daemon knows whether the renderer came up, so decide() asks
+        # rather than transitioning. A mode that said "keyboard" with nothing on
+        # screen would swallow the whole pad.
+        state = in_desktop(self.config)
+        decide(KEY, Y, 1, state, self.config)
+        self.assertIs(state.mode, Mode.DESKTOP)
 
     def test_opening_is_press_only(self):
         state = in_desktop(self.config)
@@ -531,40 +561,43 @@ class TestRouting(unittest.TestCase):
         state = with_osk(self.config)
         self.assertEqual(decide(KEY, B, 1, state, self.config).osk[0].kind, "close")
 
-    def test_a_button_the_keyboard_does_not_use_keeps_its_desktop_job(self):
-        # SELECT is Esc in desktop mode and has no keyboard meaning, so it
-        # must still be Esc while the keyboard is up.
+    def test_a_button_the_keyboard_does_not_use_does_nothing(self):
+        # SELECT is Esc in desktop mode, and while the keyboard is up it is
+        # bound to nothing -- so it does nothing. This is the whole difference
+        # from the layer this replaced, where it kept its desktop job. The
+        # layout has no Escape key, so that is a real thing given up; press B
+        # first if you want it.
         state = with_osk(self.config)
         decision = decide(KEY, SELECT, 1, state, self.config)
         self.assertFalse(decision.osk)
-        self.assertEqual(decision.virtual[0].kind, "key")
+        self.assertFalse(decision.virtual)
 
-    def test_the_release_of_a_claimed_button_is_swallowed(self):
-        # Otherwise it reaches the desktop bindings alone and releases a
-        # virtual button that was never pressed.
+    def test_the_release_of_a_button_does_nothing_either(self):
+        # No desktop binding is reachable from here, so there is no key that a
+        # stray release could let up.
         state = with_osk(self.config)
         decide(KEY, A, 1, state, self.config)
         self.assertFalse(decide(KEY, A, 0, state, self.config).virtual)
-
-    def test_sticks_still_drive_the_pointer(self):
-        # The whole reason the keyboard is a layer and not a mode.
-        state = with_osk(self.config)
-        state.axis_ranges = {buttons.ABS_X: (-32768, 32767)}
-        decide(ABS, buttons.ABS_X, 32767, state, self.config)
-        self.assertGreater(state.sticks[buttons.ABS_X], 0.9)
+        self.assertFalse(decide(KEY, SELECT, 0, state, self.config).virtual)
 
     def test_the_exit_button_still_leaves_the_mode(self):
+        # Checked before anything else the keyboard could claim: it is the one
+        # escape that must never need thinking about.
         state = with_osk(self.config)
         decision = decide(KEY, GUIDE, 1, state, self.config)
         self.assertIs(decision.mode, Mode.IDLE)
-        self.assertFalse(state.osk)
+        self.assertIs(state.mode, Mode.IDLE)
 
-    def test_leaving_clears_the_keyboard_flag(self):
+    def test_the_exit_button_releases_the_grab(self):
+        from padmode.daemon import Grab
+
         state = with_osk(self.config)
-        decide(KEY, GUIDE, 1, state, self.config)
-        self.assertFalse(state.osk)
+        self.assertIs(decide(KEY, GUIDE, 1, state, self.config).grab, Grab.RELEASE)
 
-    def test_opening_from_idle_enters_desktop_mode_with_it_up(self):
+    def test_opening_from_idle_enters_desktop_mode_first(self):
+        # Not straight to OSK: the keyboard needs the virtual devices desktop
+        # mode opens, and desktop is where a renderer that will not start
+        # should leave you.
         config = parse({"bindings": {"RB": "osk"}})
         state = State()
         decide(KEY, GUIDE, 1, state, config)
@@ -573,12 +606,135 @@ class TestRouting(unittest.TestCase):
         self.assertEqual([op.kind for op in decision.osk], ["open"])
 
 
+class TestTheKeyboardIsAMode(unittest.TestCase):
+    """Entering and leaving, and what it goes back to.
+
+    The keyboard used to be a flag over desktop mode. Making it a mode is what
+    lets every button be either bound here or inert, but it means the mode
+    underneath has to be remembered and handed back correctly -- including an
+    overlay, which is owed a return to the game.
+    """
+
+    def daemon(self, osk=None, **kwargs):
+        from padmode.daemon import Daemon
+
+        self.osk = _Osk() if osk is None else osk
+        self.virtual = _Virtual()
+        daemon = Daemon(
+            parse({}), _Reader(), _Runner(), self.virtual,
+            kwargs.get("windows"), self.osk,
+        )
+        daemon.state.mode = kwargs.get("mode", Mode.DESKTOP)
+        return daemon
+
+    def test_opening_over_desktop_remembers_desktop(self):
+        daemon = self.daemon()
+        daemon._open_osk()
+        self.assertIs(daemon.state.mode, Mode.OSK)
+        self.assertIs(daemon.state.osk_return, Mode.DESKTOP)
+
+    def test_closing_goes_back_to_desktop(self):
+        daemon = self.daemon()
+        daemon._open_osk()
+        daemon._close_osk()
+        self.assertIs(daemon.state.mode, Mode.DESKTOP)
+
+    def test_opening_over_an_overlay_goes_back_to_the_overlay(self):
+        # Not to the desktop. Closing the keyboard is not leaving the overlay,
+        # and landing on the desktop would strand the user one press further
+        # from the game than they were.
+        daemon = self.daemon(mode=Mode.OVERLAY)
+        daemon._open_osk()
+        self.assertIs(daemon.state.osk_return, Mode.OVERLAY)
+        daemon._close_osk()
+        self.assertIs(daemon.state.mode, Mode.OVERLAY)
+
+    def test_a_renderer_that_will_not_start_leaves_you_in_desktop_mode(self):
+        # Deliberately not _abort()'s landing of IDLE. A keyboard that cannot
+        # draw should cost you the keyboard, not the pointer as well.
+        daemon = self.daemon(osk=_DeadOsk())
+        daemon._open_osk()
+        self.assertIs(daemon.state.mode, Mode.DESKTOP)
+
+    def test_a_renderer_that_dies_hands_the_mode_back(self):
+        daemon = self.daemon()
+        daemon._open_osk()
+        self.osk.alive = False
+        daemon._pump_osk()
+        self.assertIs(daemon.state.mode, Mode.DESKTOP)
+
+    def test_the_renderer_saying_it_cannot_run_hands_the_mode_back(self):
+        daemon = self.daemon()
+        daemon._open_osk()
+        daemon._handle_osk(protocol.FAILED, {"reason": "no layer shell"})
+        self.assertIs(daemon.state.mode, Mode.DESKTOP)
+
+    def test_closing_from_the_grid_hands_the_mode_back(self):
+        daemon = self.daemon()
+        daemon._open_osk()
+        daemon._handle_osk(protocol.CLOSED, {})
+        self.assertIs(daemon.state.mode, Mode.DESKTOP)
+
+    def test_opening_twice_is_harmless(self):
+        daemon = self.daemon()
+        daemon._open_osk()
+        daemon._open_osk()
+        self.assertEqual(self.osk.shown, 1)
+        self.assertIs(daemon.state.osk_return, Mode.DESKTOP)
+
+    def test_it_cannot_be_opened_from_idle(self):
+        # The virtual devices are desktop mode's to open, and OSK inherits the
+        # grab from the mode underneath rather than taking one of its own.
+        daemon = self.daemon(mode=Mode.IDLE)
+        daemon._open_osk()
+        self.assertIs(daemon.state.mode, Mode.IDLE)
+        self.assertEqual(self.osk.shown, 0)
+
+    def test_a_direction_held_while_it_opens_does_not_travel(self):
+        # reset_inputs on the way in. Otherwise the deflection that was driving
+        # the pointer a frame ago is read as a push on the grid.
+        daemon = self.daemon()
+        daemon.state.sticks[buttons.ABS_X] = 0.95
+        daemon._open_osk()
+        self.assertEqual(daemon.state.sticks, {})
+        self.assertIsNone(daemon.state.osk_nav)
+
+    def test_leaving_the_keyboard_over_an_overlay_still_owes_the_return(self):
+        # Guide from the keyboard leaves everything, and the overlay underneath
+        # is still owed its return to the game. _handle resolves the previous
+        # mode through osk_return for exactly this.
+        windows = _Windows()
+        daemon = self.daemon(mode=Mode.OVERLAY, windows=windows)
+        daemon._open_osk()
+        daemon._return_to = "the-game"
+        daemon._handle(KEY, GUIDE, 1)
+        self.assertIs(daemon.state.mode, Mode.IDLE)
+        self.assertIsNotNone(daemon._pending_return)
+
+    def test_and_the_keyboard_is_taken_off_screen_first(self):
+        # Our layer surface is enumerable by the window backends, so nothing of
+        # ours may be on screen while windows are being searched for.
+        daemon = self.daemon(mode=Mode.OVERLAY, windows=_Windows())
+        daemon._open_osk()
+        daemon._handle(KEY, GUIDE, 1)
+        self.assertFalse(self.osk.alive)
+
+    def test_going_in_and_out_is_not_a_mode_entry(self):
+        # Otherwise every open would tear down and rebuild the virtual devices,
+        # and every close over an overlay would fire a return to the game.
+        daemon = self.daemon(windows=_Windows())
+        daemon._open_osk()
+        daemon._close_osk()
+        self.assertIsNone(daemon._pending_return)
+        self.assertTrue(self.osk.alive)
+
+
 class TestTheLeftStickDrivesTheGrid(unittest.TestCase):
-    """While the keyboard is up the left stick navigates instead of pointing.
+    """Both sticks belong to the keyboard while it is up.
 
     The pointer has nothing to click with by then -- the keyboard's shortcuts
     take all three mouse buttons -- so a cursor you can move but not click was
-    worse than no cursor at all.
+    worth less than a second d-pad and a way to shove the panel aside.
     """
 
     FULL = 32767
@@ -611,14 +767,16 @@ class TestTheLeftStickDrivesTheGrid(unittest.TestCase):
                 self.setUp()
                 self.assertEqual(self.push(axis, fraction).osk[0].value, expected)
 
-    def test_the_pointer_does_not_move(self):
+    def test_the_pointer_is_never_asked_while_the_keyboard_is_up(self):
+        # There is no branch for the keyboard in pointer_delta any more: the
+        # tick simply does not call it in OSK mode. Proving the parking now
+        # means proving the mode is what decides.
         self.push(buttons.ABS_X, 0.9)
-        dx, dy, _, _ = pointer_delta(self.state, self.config, 1 / 60)
-        self.assertEqual((dx, dy), (0.0, 0.0))
+        self.assertNotIn(self.state.mode, (Mode.DESKTOP, Mode.OVERLAY))
 
     def test_the_pointer_moves_again_once_the_keyboard_is_gone(self):
         self.state.sticks[buttons.ABS_X] = 0.9
-        self.state.osk = False
+        self.state.mode = Mode.DESKTOP
         dx, _, _, _ = pointer_delta(self.state, self.config, 1 / 60)
         self.assertGreater(dx, 0.0)
 
@@ -645,18 +803,179 @@ class TestTheLeftStickDrivesTheGrid(unittest.TestCase):
         decision = self.push(buttons.ABS_X, 0.65)
         self.assertFalse(decision.osk)
 
-    def test_the_right_stick_still_scrolls(self):
-        # Scrolling is not cursor control and needs no mouse button.
-        self.state.sticks[buttons.ABS_RY] = -0.9
-        _, _, _, scroll_y = pointer_delta(self.state, self.config, 1 / 60)
-        self.assertNotEqual(scroll_y, 0.0)
-
-    def test_a_bound_right_stick_direction_still_does_its_desktop_job(self):
-        # RS_RIGHT is Tab in the defaults, and tabbing between fields while
-        # typing is useful, so the keyboard leaves it alone.
+    def test_the_right_stick_neither_scrolls_nor_tabs(self):
+        # It is moving the keyboard instead. A stick cannot do both, and being
+        # able to push the panel off the field you are typing into is not
+        # available anywhere else. RS_RIGHT is Tab in the defaults and would
+        # otherwise fire on every push meant to move the panel.
         decision = self.push(buttons.ABS_RX, 0.9)
         self.assertFalse(decision.osk)
-        self.assertTrue(decision.virtual)
+        self.assertFalse(decision.virtual)
+
+    def test_the_tick_does_not_smuggle_a_bound_direction_through(self):
+        # The tick re-reads the same axes from scratch, so routing the event
+        # path away from the desktop bindings and leaving the tick alone would
+        # have Tab firing anyway, once, some frames later. RS_RIGHT is Tab in
+        # the defaults, and here the right stick is moving the panel.
+        from padmode.daemon import Daemon
+
+        daemon = Daemon(parse({}), _Reader(), _Runner(), _Virtual(), None, _Osk())
+        daemon.state.mode = Mode.OSK
+        daemon.state.sticks[buttons.ABS_RX] = 0.9
+        daemon.state.sticks[buttons.ABS_X] = 0.9
+        daemon._tick()
+        self.assertEqual(daemon._virtual.keys_tapped, [])
+
+    def test_the_right_stick_moves_the_keyboard(self):
+        self.state.sticks[buttons.ABS_RX] = 0.9
+        self.state.sticks[buttons.ABS_RY] = -0.9
+        dx, dy = osk_move_delta(self.state, self.config, 1 / 60)
+        self.assertGreater(dx, 0.0)
+        self.assertLess(dy, 0.0)
+
+    def test_it_does_not_move_when_the_keyboard_is_down(self):
+        self.state.mode = Mode.DESKTOP
+        self.state.sticks[buttons.ABS_RX] = 0.9
+        self.assertEqual(osk_move_delta(self.state, self.config, 1 / 60), (0.0, 0.0))
+
+    def test_a_resting_right_stick_moves_nothing(self):
+        # The daemon skips the message entirely when this is zero, so an idle
+        # stick costs no pipe traffic at all.
+        self.state.sticks[buttons.ABS_RX] = 0.05
+        self.assertEqual(osk_move_delta(self.state, self.config, 1 / 60), (0.0, 0.0))
+
+    def test_a_bound_direction_still_works_once_the_keyboard_is_gone(self):
+        # The mode took the whole stick; leaving must hand all of it back.
+        self.state.mode = Mode.DESKTOP
+        self.assertTrue(
+            stick_tick_ops(self.state, self.config.desktop, 1.0) == ()
+        )
+        self.state.sticks[buttons.ABS_RX] = 0.9
+        self.assertTrue(stick_tick_ops(self.state, self.config.desktop, 1.0))
+
+
+class TestHoldingADirectionTravels(unittest.TestCase):
+    """Hold a direction and the highlight keeps going.
+
+    The grid is thirteen keys wide, and one step per push meant thirteen
+    pushes to reach Backspace -- which is what "stiff" meant. The first step is
+    still immediate, from the event; the rest come off the tick, because a
+    stick held at deflection and a d-pad held down both sit there emitting
+    nothing at all.
+    """
+
+    FULL = 32767
+    DELAY = Config().osk.repeat_delay
+    INTERVAL = Config().osk.repeat_interval
+
+    def setUp(self):
+        self.config = Config()
+        self.state = with_osk(self.config)
+        self.state.axis_ranges = {
+            code: (-32768, 32767)
+            for code in (buttons.ABS_X, buttons.ABS_Y)
+        }
+
+    def push(self, fraction, now=0.0, axis=buttons.ABS_X):
+        return decide(ABS, axis, int(self.FULL * fraction), self.state,
+                      self.config, now)
+
+    def hat(self, value, now=0.0, axis=buttons.ABS_HAT0X):
+        return decide(ABS, axis, value, self.state, self.config, now)
+
+    def steps(self, now):
+        return [op.value for op in osk_nav_ops(self.state, self.config, now)]
+
+    # -- the stick -----------------------------------------------------
+    def test_the_first_step_is_immediate_and_the_next_one_waits(self):
+        self.assertEqual([op.value for op in self.push(0.9).osk], ["right"])
+        self.assertEqual(self.steps(self.DELAY - 0.01), [])
+        self.assertEqual(self.steps(self.DELAY), ["right"])
+
+    def test_then_it_repeats_at_the_configured_rate(self):
+        self.push(0.9)
+        self.assertEqual(self.steps(self.DELAY), ["right"])
+        self.assertEqual(self.steps(self.DELAY + self.INTERVAL / 2), [])
+        self.assertEqual(self.steps(self.DELAY + self.INTERVAL), ["right"])
+
+    def test_letting_go_stops_it(self):
+        self.push(0.9)
+        self.push(0.1, now=self.DELAY / 2)
+        self.assertIsNone(self.state.osk_nav)
+        self.assertEqual(self.steps(self.DELAY * 4), [])
+
+    def test_relaxing_a_little_keeps_it_going(self):
+        # No thumb holds a stick at full deflection for a second. Stopping the
+        # travel because it drifted to 0.5 would be the stiffness back again.
+        self.push(0.95)
+        self.push(0.55, now=self.DELAY / 2)
+        self.assertEqual(self.steps(self.DELAY), ["right"])
+
+    def test_the_spring_back_after_a_long_hold_does_not_step_the_other_way(self):
+        # The settle window is set when the direction *fires*, and a hold
+        # outlasts it -- so by the time the stick is let go there is nothing
+        # covering the ring back past centre, and it takes a step left on the
+        # way home. Letting go blocks the opposite direction instead.
+        self.push(0.95, now=0.0)
+        self.steps(5.0)                      # held for five seconds
+        self.push(0.1, now=5.0)              # let go: passes through centre
+        self.assertFalse(self.push(-0.8, now=5.01).osk)  # the overshoot
+
+    def test_a_direction_can_be_pushed_again_after_recentring(self):
+        self.push(0.95, now=0.0)
+        self.push(0.0, now=1.0)
+        self.assertTrue(self.push(0.95, now=1.5).osk)
+
+    def test_pushing_the_same_way_again_is_not_delayed_by_the_release(self):
+        # Only the rebound direction is blocked. Blocking the whole axis for a
+        # settle window would swallow this push -- and a swallowed push stays
+        # swallowed until the stick goes home, so the user just sees the
+        # keyboard ignore them.
+        self.push(0.95, now=0.0)
+        self.steps(2.0)                       # held, travelling
+        self.push(0.05, now=2.0)              # released, passing centre
+        self.assertTrue(self.push(0.95, now=2.02).osk)
+
+    def test_pushing_the_other_way_travels_the_other_way(self):
+        self.push(0.9, now=0.0)
+        self.push(0.0, now=1.0)
+        self.push(-0.9, now=1.5)
+        self.assertEqual(self.steps(1.5 + self.DELAY), ["left"])
+
+    # -- the d-pad -----------------------------------------------------
+    def test_the_dpad_travels_too(self):
+        self.assertEqual([op.value for op in self.hat(1).osk], ["right"])
+        self.assertEqual(self.steps(self.DELAY), ["right"])
+
+    def test_releasing_the_dpad_stops_it(self):
+        self.hat(1)
+        self.hat(0, now=0.1)
+        self.assertIsNone(self.state.osk_nav)
+        self.assertEqual(self.steps(self.DELAY * 4), [])
+
+    def test_releasing_the_other_axis_does_not_stop_it(self):
+        # Roll from right to up and back off the vertical: the horizontal is
+        # still held, and it is the one that should still be travelling.
+        self.hat(1, axis=buttons.ABS_HAT0X)
+        self.hat(-1, now=0.1, axis=buttons.ABS_HAT0Y)
+        self.hat(0, now=0.2, axis=buttons.ABS_HAT0X)
+        self.assertEqual(self.steps(0.1 + self.DELAY), ["up"])
+
+    # -- turning it off, and not travelling when there is nothing to ---
+    def test_zero_interval_gives_one_step_per_push(self):
+        config = parse({"osk": {"repeat_interval": 0}})
+        state = with_osk(config)
+        state.axis_ranges = {buttons.ABS_X: (-32768, 32767)}
+        self.assertTrue(decide(ABS, buttons.ABS_X, self.FULL, state, config, 0.0).osk)
+        self.assertEqual(osk_nav_ops(state, config, 10.0), ())
+
+    def test_it_stops_when_the_keyboard_goes_away(self):
+        self.push(0.9)
+        self.state.mode = Mode.DESKTOP
+        self.assertEqual(self.steps(self.DELAY), [])
+        # Cleared rather than left to go stale, so putting the keyboard back up
+        # does not resume a push from before it closed.
+        self.assertIsNone(self.state.osk_nav)
 
 
 class _Reader:
@@ -683,10 +1002,24 @@ class _Runner:
         pass
 
 
+class _Windows:
+    """A window backend that does nothing, so a return can be scheduled."""
+
+    def find_window(self, window_class):
+        return None
+
+    def activate_window(self, window_id):
+        pass
+
+    def get_active_window(self):
+        return None
+
+
 class _Virtual:
     def __init__(self):
         self.clicks = []
         self.held = set()
+        self.keys_tapped = []
 
     def open(self):
         return True
@@ -702,7 +1035,13 @@ class _Virtual:
         pass
 
     def tap_keys(self, codes):
-        pass
+        self.keys_tapped.append(tuple(codes))
+
+    def move(self, dx, dy):
+        self.pointer = (dx, dy)
+
+    def scroll(self, dx, dy):
+        self.wheel = (dx, dy)
 
     def release_all(self):
         # The real one clears everything it is holding; a fake that did not
@@ -721,9 +1060,17 @@ class _Osk:
         self.hidden = 0
         self.asked = 0
         self.alive = True
+        self.steps = []
+        self.moves = []
 
     def ask_focus(self):
         self.asked += 1
+
+    def step(self, direction):
+        self.steps.append(direction)
+
+    def move(self, dx, dy):
+        self.moves.append((dx, dy))
 
     def start(self):
         return True
@@ -741,6 +1088,13 @@ class _Osk:
         return []
 
 
+class _DeadOsk(_Osk):
+    """A renderer that cannot run: no toolkit, or no layer-shell."""
+
+    def start(self):
+        return False
+
+
 class TestAutoOpen(unittest.TestCase):
     """Opening is deliberately hard; closing is deliberately narrow."""
 
@@ -755,6 +1109,9 @@ class TestAutoOpen(unittest.TestCase):
         daemon.state.mode = Mode.DESKTOP
         return daemon
 
+    def up(self, daemon):
+        return daemon.state.mode is Mode.OSK
+
     def click(self, daemon):
         """What the daemon does when the pad presses the left mouse button."""
         from padmode.daemon import VirtualOp
@@ -765,7 +1122,7 @@ class TestAutoOpen(unittest.TestCase):
         daemon = self.daemon()
         self.click(daemon)
         daemon._focus_changed(True)
-        self.assertTrue(daemon.state.osk)
+        self.assertTrue(self.up(daemon))
         self.assertEqual(self.osk.shown, 1)
 
     def test_a_text_field_with_no_click_of_ours_does_not(self):
@@ -773,7 +1130,7 @@ class TestAutoOpen(unittest.TestCase):
         # would cost the pointer for a keyboard nobody asked for.
         daemon = self.daemon()
         daemon._focus_changed(True)
-        self.assertFalse(daemon.state.osk)
+        self.assertFalse(self.up(daemon))
         self.assertEqual(self.osk.shown, 0)
 
     def test_the_click_window_expires(self):
@@ -781,14 +1138,14 @@ class TestAutoOpen(unittest.TestCase):
         self.click(daemon)
         daemon._clicked_at -= 60.0  # a minute ago, not just now
         daemon._focus_changed(True)
-        self.assertFalse(daemon.state.osk)
+        self.assertFalse(self.up(daemon))
 
     def test_leaving_a_text_field_closes_what_opened_itself(self):
         daemon = self.daemon()
         self.click(daemon)
         daemon._focus_changed(True)
         daemon._focus_changed(False)
-        self.assertFalse(daemon.state.osk)
+        self.assertFalse(self.up(daemon))
         self.assertEqual(self.osk.hidden, 1)
 
     def test_it_does_not_close_one_you_asked_for(self):
@@ -797,7 +1154,7 @@ class TestAutoOpen(unittest.TestCase):
         daemon = self.daemon()
         daemon._open_osk()               # as the Y button does
         daemon._focus_changed(False)
-        self.assertTrue(daemon.state.osk)
+        self.assertTrue(self.up(daemon))
         self.assertEqual(self.osk.hidden, 0)
 
     def test_a_manual_open_stays_manual_even_after_a_text_field(self):
@@ -806,20 +1163,20 @@ class TestAutoOpen(unittest.TestCase):
         self.click(daemon)
         daemon._focus_changed(True)      # already open: changes nothing
         daemon._focus_changed(False)
-        self.assertTrue(daemon.state.osk)
+        self.assertTrue(self.up(daemon))
 
     def test_disabled_means_nothing_happens(self):
         daemon = self.daemon(auto_open=False)
         self.click(daemon)
         daemon._focus_changed(True)
-        self.assertFalse(daemon.state.osk)
+        self.assertFalse(self.up(daemon))
 
     def test_nothing_happens_outside_a_pad_mode(self):
         daemon = self.daemon()
         daemon.state.mode = Mode.IDLE
         self.click(daemon)
         daemon._focus_changed(True)
-        self.assertFalse(daemon.state.osk)
+        self.assertFalse(self.up(daemon))
 
     def test_opening_does_not_leave_the_mouse_button_held(self):
         # Auto-open lands *between* the press and the release of the very click
@@ -876,7 +1233,7 @@ class TestAutoOpen(unittest.TestCase):
         self.click(daemon)
         daemon._focus_changed(True)
         daemon._focus_changed(False)          # the field went away
-        self.assertFalse(daemon.state.osk)
+        self.assertFalse(self.up(daemon))
         self.assertIsNone(daemon._focus_check_at)
 
     def test_it_does_not_ask_while_the_keyboard_is_already_up(self):
@@ -898,6 +1255,111 @@ class TestAutoOpen(unittest.TestCase):
         self.assertFalse(daemon._osk_auto)
 
 
+class TestTheTickDrivesTheKeyboard(unittest.TestCase):
+    """The two continuous jobs, end to end through the daemon.
+
+    Both are invisible to the event path: a stick held at deflection stops
+    emitting, so travelling across the grid and sliding the panel both have to
+    come off the tick or not happen at all.
+    """
+
+    def daemon(self):
+        from padmode.daemon import Daemon
+
+        self.osk = _Osk()
+        daemon = Daemon(parse({}), _Reader(), _Runner(), _Virtual(), None, self.osk)
+        daemon.state.mode = Mode.OSK
+        daemon.state.osk_return = Mode.DESKTOP
+        return daemon
+
+    def test_a_held_direction_keeps_stepping(self):
+        from padmode.daemon import OskNav
+
+        daemon = self.daemon()
+        daemon.state.sticks[buttons.ABS_X] = 0.9
+        daemon.state.axis_disarmed.add(buttons.ABS_X)  # already fired once
+        daemon.state.osk_nav = OskNav("right", 0.0, buttons.ABS_X, 1)
+        daemon._tick()
+        self.assertEqual(self.osk.steps, ["right"])
+
+    def test_a_pushed_right_stick_slides_the_panel(self):
+        daemon = self.daemon()
+        daemon.state.sticks[buttons.ABS_RX] = 0.9
+        daemon._tick()
+        self.assertEqual(len(self.osk.moves), 1)
+        self.assertGreater(self.osk.moves[0][0], 0.0)
+
+    def test_a_resting_stick_sends_nothing(self):
+        daemon = self.daemon()
+        daemon._tick()
+        self.assertEqual(self.osk.moves, [])
+        self.assertEqual(self.osk.steps, [])
+
+    def test_the_pointer_is_not_driven_at_all(self):
+        # Not "driven to zero": the tick returns before it asks. A pointer that
+        # was still being computed would be one more thing to keep parked.
+        daemon = self.daemon()
+        daemon.state.sticks[buttons.ABS_X] = 0.9
+        daemon._tick()
+        self.assertFalse(hasattr(daemon._virtual, "pointer"))
+
+
+class TestWhereThePanelSits(unittest.TestCase):
+    """Where the keyboard sits, as a corner inside the screen's usable area.
+
+    The surface needs a compositor and CI has none, so the arithmetic lives in
+    ``model`` where it can be checked without one. What it produces is a
+    top-left corner, which the surface hands over as a pair of layer-shell
+    margins -- the keyboard is its own surface, so moving it moves the surface.
+    """
+
+    OUTPUT = (1920.0, 1080.0)
+    PANEL = (1200.0, 300.0)
+
+    def test_it_starts_centred_against_the_bottom(self):
+        x, y = model.home_position(self.PANEL, self.OUTPUT, "bottom")
+        self.assertEqual((x, y), (360.0, 780.0))
+
+    def test_or_against_the_top(self):
+        x, y = model.home_position(self.PANEL, self.OUTPUT, "top")
+        self.assertEqual((x, y), (360.0, 0.0))
+
+    def test_it_cannot_be_pushed_off_the_screen(self):
+        self.assertEqual(
+            model.clamp_position(-500.0, 5000.0, self.PANEL, self.OUTPUT),
+            (0.0, 780.0),
+        )
+        self.assertEqual(
+            model.clamp_position(5000.0, -500.0, self.PANEL, self.OUTPUT),
+            (720.0, 0.0),
+        )
+
+    def test_a_position_inside_the_screen_is_left_alone(self):
+        self.assertEqual(
+            model.clamp_position(10.5, 20.25, self.PANEL, self.OUTPUT),
+            (10.5, 20.25),
+        )
+
+    def test_a_panel_larger_than_the_output_goes_to_the_corner(self):
+        # Better to lose the far edge than to start the highlight off-screen.
+        self.assertEqual(
+            model.clamp_position(50.0, 50.0, (4000.0, 4000.0), self.OUTPUT),
+            (0.0, 0.0),
+        )
+
+    def test_the_box_is_the_usable_area_not_the_monitor(self):
+        # The distinction that put the keyboard below the bottom of the screen.
+        # A layer-shell margin is measured from the usable area, so homing
+        # against the monitor's geometry overshoots by whatever the panels
+        # reserve -- 34px of it on the machine this was found on.
+        monitor, usable = (1920.0, 1080.0), (1920.0, 1046.0)
+        _, against_monitor = model.home_position(self.PANEL, monitor, "bottom")
+        _, against_usable = model.home_position(self.PANEL, usable, "bottom")
+        self.assertEqual(against_monitor - against_usable, 34.0)
+        # And the bottom of the keyboard lands exactly on the usable edge.
+        self.assertEqual(against_usable + self.PANEL[1], usable[1])
+
+
 class TestConfig(unittest.TestCase):
     def test_osk_is_a_valid_desktop_binding(self):
         config = parse({"desktop": {"bindings": {"RB": "osk"}}})
@@ -910,6 +1372,23 @@ class TestConfig(unittest.TestCase):
         with self.assertRaises(ConfigError) as caught:
             parse({"osk": {"enabled": False}, "desktop": {"bindings": {"RB": "osk"}}})
         self.assertIn("enabled = false", str(caught.exception))
+
+    def test_the_repeat_and_move_knobs(self):
+        config = parse({"osk": {
+            "repeat_delay": 0.5, "repeat_interval": 0.1, "move_speed": 1500,
+        }})
+        self.assertEqual(config.osk.repeat_delay, 0.5)
+        self.assertEqual(config.osk.repeat_interval, 0.1)
+        self.assertEqual(config.osk.move_speed, 1500.0)
+
+    def test_nonsense_repeat_and_move_values(self):
+        for key, value in (
+            ("repeat_delay", 0.0), ("repeat_delay", 5.0), ("repeat_delay", "fast"),
+            ("repeat_interval", -1), ("repeat_interval", 2.0),
+            ("move_speed", 0), ("move_speed", True),
+        ):
+            with self.subTest(key=key, value=value), self.assertRaises(ConfigError):
+                parse({"osk": {key: value}})
 
     def test_the_dpad_cannot_be_rebound(self):
         with self.assertRaises(ConfigError) as caught:
@@ -955,6 +1434,7 @@ class TestConfig(unittest.TestCase):
             "A": "commit", "B": "close", "X": "back", "Y": "space",
             "START": "enter", "LB": "left", "RB": "right",
             "LT": "shift", "RT": "layer", "L3": "capslock",
+            "R3": "recenter",
         })
 
     def test_the_triggers_are_bindable_here(self):
@@ -967,34 +1447,39 @@ class TestConfig(unittest.TestCase):
                 self.assertIn(button, buttons.BUTTONS)
 
     def test_every_action_with_a_shortcut_can_carry_a_badge(self):
-        # The renderer draws a badge by looking the key's action up in the
-        # hints, so an action bound to a button but absent from both layers
-        # would be a shortcut with nowhere on screen to advertise itself.
+        # The view draws a badge by looking the key's action up in the hints,
+        # so an action bound to a button but absent from both layers would be a
+        # shortcut with nowhere on screen to advertise itself.
         on_grid = {
             key.action
-            for rows in layout.LAYERS.values() for row in rows for key in row
+            for rows in keys.LAYERS.values() for row in rows for key in row
             if key.action
         }
-        # commit and close act on the grid as a whole rather than on one key,
-        # so they are the two the legend line exists for.
-        expected_off_grid = {"commit", "close"}
+        # commit, close and recenter act on the keyboard as a whole rather than
+        # on one key, so they are what the legend line exists for. Held against
+        # the grid's own list, not a copy of it.
+        legend = {action for action, _ in keys.OFF_GRID_HINTS}
         bound = set(Config().osk.bindings.values())
-        self.assertEqual(bound - on_grid, expected_off_grid)
+        self.assertEqual(bound - on_grid, legend)
 
 
 class TestTheDaemonNeverImportsTheRenderer(unittest.TestCase):
     """The promise that a missing toolkit disables one feature, checked.
 
-    An accidental ``from .renderer import ...`` at the top of a module is
-    exactly the kind of thing that survives review and turns "no GTK" into "no
-    daemon" on someone else's machine.
+    An accidental ``from .view import ...`` at the top of a module is exactly
+    the kind of thing that survives review and turns "no GTK" into "no daemon"
+    on someone else's machine.
     """
 
+    #: The GTK half. Reaching any of these from the daemon is the failure.
+    DRAWS = ("padmode.osk.surface", "padmode.osk.view", "padmode.osk.app",
+             "padmode.osk.focus")
+
     def imports_of(self, module: str) -> set[str]:
+        drawn = " or ".join(f"m == {name!r}" for name in self.DRAWS)
         code = (
             f"import {module}, sys; "
-            "print([m for m in sys.modules "
-            "if m.startswith('gi') or m == 'padmode.osk.renderer'])"
+            f"print([m for m in sys.modules if m.startswith('gi') or {drawn}])"
         )
         out = subprocess.run(
             [sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True,
@@ -1015,6 +1500,13 @@ class TestTheDaemonNeverImportsTheRenderer(unittest.TestCase):
         # config imports the protocol for its action names, which is fine only
         # for as long as the protocol stays stdlib.
         self.assertEqual(self.imports_of("padmode.config"), set())
+
+    def test_the_grid_and_its_state_stay_stdlib_too(self):
+        # They are the renderer's, but they are also what CI can test, which is
+        # only true for as long as importing them needs no toolkit.
+        for module in ("padmode.osk.keys", "padmode.osk.model"):
+            with self.subTest(module=module):
+                self.assertEqual(self.imports_of(module), set())
 
 
 if __name__ == "__main__":

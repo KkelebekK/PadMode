@@ -7,7 +7,8 @@ dependency live behind ``python -m padmode.osk`` and are never imported here
 
 The keyboard is an optional feature, probed like ``playerctl``: if
 gtk4-layer-shell is missing, :meth:`OskClient.start` says so once and returns
-False. That disables the keyboard. It never stops the daemon starting.
+False. That disables the keyboard. It never stops the daemon starting, and it
+never leaves the daemon in ``Mode.OSK`` -- the caller checks the return.
 """
 
 from __future__ import annotations
@@ -139,6 +140,14 @@ class OskClient:
 
     def step(self, direction: str) -> None:
         self._send(protocol.encode(protocol.STEP, dir=direction))
+
+    def move(self, dx: float, dy: float) -> None:
+        """Slide the panel. Sent on the tick, so only when it is really moving.
+
+        Rounded to a tenth of a pixel: the surface accumulates the remainder
+        anyway, and it keeps the tick's worth of JSON short.
+        """
+        self._send(protocol.encode(protocol.MOVE, dx=round(dx, 1), dy=round(dy, 1)))
 
     def act(self, name: str) -> None:
         self._send(protocol.encode(protocol.ACT, name=name))

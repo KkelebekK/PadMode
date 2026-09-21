@@ -428,9 +428,24 @@ guessable from the documentation:
    rescaled, and mapped again — the same path the pre-warm pass uses, and it
    costs 0.6 ms.
 
-The renderer logs one line per measure and rescale to stderr, which the daemon
-inherits and journald collects. Sizing depends on compositor timing that no
-test can reproduce, so the decisions are traceable rather than merely
+**Since the rewrite, the surface *is* the keyboard.** It is no longer stretched
+across the output: it is anchored to the top-left corner at exactly the size the
+keys measure, and a pair of layer-shell margins says where that corner is. That
+is what lets the right stick slide the panel out from under whatever you are
+typing into — the corner arithmetic lives in `osk/model.py`, where it can be
+tested without a compositor. Anchoring all four edges is now only how the
+*measuring* pass asks the compositor how big the output is.
+
+It costs one thing and buys another. A panel-sized surface cannot tell which
+output it is on from its own width — which is how the full-width version
+noticed, in point 4 above. So the measuring pass runs before every show rather
+than once at startup: measured on Plasma 6.7, 5 ms and a single frame, and it
+turns "moved to another screen mid-session" from a case handled by comparing
+widths into a case that cannot arise.
+
+The renderer logs one line per measure, rescale and placement to stderr, which
+the daemon inherits and journald collects. Sizing depends on compositor timing
+that no test can reproduce, so the decisions are traceable rather than merely
 inferrable from what ends up on screen.
 
 **The keyboard does not take mouse input.** Its input region is empty, so
