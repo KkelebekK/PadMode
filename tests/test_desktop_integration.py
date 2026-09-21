@@ -4,7 +4,12 @@ This is the only automated proof that the uinput output path works. It drives
 the daemon with a synthetic gamepad, then opens padmode's *own* virtual pointer
 and keyboard as ordinary input devices and asserts on what came out of them.
 
-Skipped without /dev/uinput access, like the other integration tests.
+Skipped without /dev/uinput access, like the other integration tests -- and
+skipped by default even with it. What this file emits is not simulated: the
+pointer really moves, the session really scrolls, and windows really alt-tab,
+on whatever desktop happens to be running the suite. That is the whole point of
+the file, and it is also why it is the one thing here you would not want firing
+while you work. Set ``PADMODE_INTEGRATION=1`` to run it (see ``tests``).
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ try:
 except ImportError:  # pragma: no cover
     HAVE_EVDEV = False
 
+from . import drives_the_desktop
 from padmode import buttons
 from padmode.config import Config
 from padmode.daemon import Daemon
@@ -67,6 +73,7 @@ class Sink:
 
 
 @unittest.skipUnless(_uinput_available(), "needs write access to /dev/uinput")
+@drives_the_desktop
 class TestDesktopModeEndToEnd(unittest.TestCase):
     def setUp(self):
         from padmode.input import GamepadReader, VirtualInput
