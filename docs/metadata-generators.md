@@ -77,9 +77,9 @@ step, and reading it too early gets a partial file.
 
 ## Steam
 
-**Partly built.** Reading the library is done (`metadata/steam.py`,
-`metadata/vdf.py`); art, filtering and output below are still specification,
-and nothing is reachable from `padmode metadata` yet.
+**Partly built.** Reading the library and locating art are done
+(`metadata/steam.py`, `metadata/vdf.py`); filtering and output below are still
+specification, and nothing is reachable from `padmode metadata` yet.
 
 **Finding Steam:** `~/.steam/root` first — Steam keeps that link pointing at
 its real install — then `~/.local/share/Steam`, then the Flatpak's
@@ -110,11 +110,45 @@ Measured on the development machine: 16 manifests, 16 installed, read in
 Linux Runtimes, Steamworks Common Redistributables) — which is the filter's
 job, below, and why it cannot be an afterthought.
 
-**Art:** `~/.local/share/Steam/appcache/librarycache/`. **Newer Steam versions
-use a subdirectory per appid**, not the flat `<appid>_library_600x900.jpg`
-naming that nearly every guide and blog post still assumes. Handle the
-per-appid layout as the primary case. Nothing is downloaded: the art is already
-on disk, so this generator only locates it.
+**Art:** `<steam>/appcache/librarycache/`, and only there — a library on
+another drive has no cache of its own. Nothing is downloaded: the art is
+already on disk, and `find_art` only locates it. Measured over the 572 app
+directories in the cache on the development machine:
+
+| Role | File name | Size | Apps |
+|---|---|---|---|
+| cover (portrait) | `library_600x900.jpg` **or** `library_capsule.jpg` | 300x450 | 199 + 73 |
+| background | `library_hero.jpg` | 1920x620 | 262 |
+| logo | `logo.png` | 640x360 | 249 |
+| header | `library_header.jpg` **or** `header.jpg` | 460x215 | 130 + 385 |
+
+- **The cover has two names**, and no app has both. `library_capsule.jpg` is
+  the newer one. The "600x900" in the older name is not the file's size.
+- **Three layouts, and one app can mix them.** Loose in `<appid>/`; one file
+  per hashed subdirectory, `<appid>/<sha1>/<name>` — every
+  `library_capsule.jpg` is stored this way; and the flat
+  `<appid>_library_600x900.jpg` that nearly every guide still describes, which
+  **not one file on this machine uses**. Dice & Fold has its cover hashed and
+  its background loose, so the layout is decided per file, not per app.
+- A loose `<sha1>.jpg` beside the art is a 32x32 icon, never a cover.
+- All 1903 images in the cache start with a valid JPEG/PNG signature, and no
+  app has two files for one role. `find_art` still passes over empty files
+  (what Steam leaves mid-write) and takes the newest where there are two.
+- The binary `assetcache.vdf` at the top of the cache indexes these files. It
+  is not read: walking the directories finds the same thing without a second,
+  binary, parser.
+
+On the real library, all 7 games get a cover and a background. **None of the
+9 non-games has a cover** (one has a background). That makes "no cover" a
+tempting filter signal — but a game Steam has not shown yet has no art cached
+either, so it would vanish until it was. Recorded for the filter, not used.
+
+**Open for the output step:** point Pegasus at the files in Steam's cache, or
+copy them next to the metadata (as Heroic does)? Steam's cache is not
+permanent — hashed directory names change when art is updated, and the index
+records a `last_cleanup_time` — so a reference into it can go stale between
+runs. Copying costs a validation step (a partial copy is a broken cover until
+someone deletes it, which is the Heroic lesson again).
 
 **Filtering:** Proton builds, Steam Linux Runtime, Steamworks Common
 Redistributables and similar appear as ordinary entries and must be dropped, or

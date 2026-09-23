@@ -202,7 +202,7 @@ Core stays frontend-agnostic: nothing here knows what Pegasus is.
 | ~~**v0.3**~~ ✅ | Window backends, overlay mode, return-to-game | KDE + X11 |
 | ~~**v0.4**~~ ✅ | Frontend integration (return target), Heroic metadata generator | KDE + X11 |
 | **v0.5** 🔨 | On-screen keyboard, console style (`docs/on-screen-keyboard.md`) | **KDE Wayland only** — layer-shell, not window activation. X11 was dropped from this version: it needs override-redirect, which is different code, not a flag. The keyboard is therefore *narrower* than overlays, and the README says so |
-| **v0.6** | Steam metadata generator (reading built; art, filter, output not) | None |
+| **v0.6** | Steam metadata generator (reading and art built; filter, output not) | None |
 | **v0.7** | Unlock module (opt-in, off by default) | Screensaver D-Bus |
 
 Do not pull work earlier in this list. The point of the ordering is that v0.1

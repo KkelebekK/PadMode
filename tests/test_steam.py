@@ -1,4 +1,4 @@
-"""Reading a Steam library: the KeyValues reader, and the manifests it reads.
+"""Reading a Steam library: the KeyValues reader, the manifests, and the art.
 
 Every fixture is text written here, shaped after files Steam wrote on the
 maintainer's machine. The reader was also run over every text ``.vdf`` and
@@ -8,6 +8,7 @@ cases below (the byte-order mark, CRLF) are what that run turned up.
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import unittest
@@ -306,6 +307,86 @@ class TestInstalledApps(SteamDirCase):
         # They are apps to Steam. Dropping them is the filter's job, not this.
         self.install(self.steam, 1493710, name="Proton Experimental", flags=6)
         self.assertEqual(len(steam.installed_apps(self.steam)), 1)
+
+
+class TestArt(SteamDirCase):
+    """Layouts are the ones found in the real cache; see ``steam.find_art``."""
+
+    def art(self, relative, mtime=None, data=b"\xff\xd8\xff image"):
+        path = self.steam / steam.ART_CACHE / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        if mtime is not None:
+            os.utime(path, (mtime, mtime))
+        return path
+
+    def find(self, appid=10):
+        return steam.find_art(self.steam, appid)
+
+    def test_loose_in_the_app_directory(self):
+        cover = self.art("10/library_600x900.jpg")
+        background = self.art("10/library_hero.jpg")
+        logo = self.art("10/logo.png")
+        header = self.art("10/header.jpg")
+        self.assertEqual(self.find(), steam.Art(cover, background, logo, header))
+
+    def test_in_hashed_subdirectories(self):
+        # Every library_capsule.jpg in the real cache is stored this way.
+        cover = self.art("10/711e39803402def82a90e1f31578c64744f952f3/library_capsule.jpg")
+        background = self.art("10/3eeb9970d8a8b6634d114b43e0edba78a7ee1eb6/library_hero.jpg")
+        header = self.art("10/9f07297252126692448208dc3e9d00fbcd690759/library_header.jpg")
+        art = self.find()
+        self.assertEqual(
+            (art.cover, art.background, art.header), (cover, background, header)
+        )
+
+    def test_one_app_can_mix_both(self):
+        # Measured: Dice & Fold's cover is hashed, its background loose.
+        cover = self.art("10/b5d4f63c530eba50441f7c433964f04f5f7d4448/library_600x900.jpg")
+        background = self.art("10/library_hero.jpg")
+        art = self.find()
+        self.assertEqual((art.cover, art.background), (cover, background))
+
+    def test_the_flat_layout_the_guides_describe(self):
+        cover = self.art("10_library_600x900.jpg")
+        self.assertEqual(self.find().cover, cover)
+
+    def test_the_icon_is_not_a_cover(self):
+        self.art("10/adc18a4fc9adc0330144b76d61cbda68bb2394a0.jpg")
+        self.assertEqual(self.find(), steam.Art())
+
+    def test_nothing_cached(self):
+        self.assertEqual(self.find(), steam.Art())
+        (self.steam / steam.ART_CACHE / "10").mkdir(parents=True)
+        self.assertEqual(self.find(), steam.Art())
+
+    def test_another_apps_art_is_not_borrowed(self):
+        self.art("100/library_600x900.jpg")
+        self.art("100_library_600x900.jpg")
+        self.art("10x/library_600x900.jpg")
+        self.assertIsNone(self.find(10).cover)
+
+    def test_an_empty_file_is_passed_over(self):
+        # What Steam leaves while it is still writing.
+        self.art("10/library_600x900.jpg", mtime=2_000_000_000, data=b"")
+        cover = self.art("10/abc/library_capsule.jpg", mtime=1_000_000_000)
+        self.assertEqual(self.find().cover, cover)
+
+    def test_the_newest_copy_wins(self):
+        old = self.art("10/library_hero.jpg", mtime=1_000_000_000)
+        new = self.art("10/abc/library_hero.jpg", mtime=2_000_000_000)
+        self.assertEqual(self.find().background, new)
+        os.utime(old, (3_000_000_000, 3_000_000_000))
+        self.assertEqual(self.find().background, old)
+
+    def test_a_tie_keeps_the_loose_file(self):
+        loose = self.art("10/library_hero.jpg", mtime=1_000_000_000)
+        self.art("10/abc/library_hero.jpg", mtime=1_000_000_000)
+        self.assertEqual(self.find().background, loose)
+
+    def test_a_directory_with_the_right_name_is_not_art(self):
+        (self.steam / steam.ART_CACHE / "10" / "library_hero.jpg").mkdir(parents=True)
+        self.assertIsNone(self.find().background)
 
 
 if __name__ == "__main__":

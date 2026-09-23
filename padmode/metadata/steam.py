@@ -1,10 +1,10 @@
 """Steam -> Pegasus metadata.
 
-**Partly built.** What is here reads the library: where Steam lives, which
-library folders it has, and which apps are installed in them. Art, filtering
-out runtimes and tools, and writing the Pegasus file are specified in
-``docs/metadata-generators.md`` and not built yet, so this is not reachable
-from ``padmode metadata``.
+**Partly built.** What is here reads the library -- where Steam lives, which
+library folders it has, which apps are installed in them -- and finds each
+app's art. Filtering out runtimes and tools, and writing the Pegasus file, are
+specified in ``docs/metadata-generators.md`` and not built yet, so this is not
+reachable from ``padmode metadata``.
 
 Steam describes each installed app in an ``appmanifest_<appid>.acf`` file, in
 Valve's KeyValues text format (:mod:`.vdf`). Nothing here talks to Steam or
@@ -14,6 +14,7 @@ the network: the manifests are the whole source of truth.
 from __future__ import annotations
 
 import logging
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +36,28 @@ STEAM_CANDIDATES = (
 #: the app being installed. Test the bit, never compare: an installed app with
 #: an update waiting reads 6, not 4 (measured: Proton Experimental, here).
 FULLY_INSTALLED = 4
+
+#: Steam's art cache, under its own directory. A library on another drive has
+#: no cache of its own: every app's art is here, wherever the app is installed.
+ART_CACHE = "appcache/librarycache"
+
+#: The file names Steam gives each piece of art, by role. Measured over the
+#: 572 app directories in the cache here:
+#:
+#: - the portrait cover is ``library_600x900.jpg`` (199 apps) or the newer
+#:   ``library_capsule.jpg`` (73), never both for one app. Both files are
+#:   300x450 -- the size in the first name is not the size of the file;
+#: - the background is ``library_hero.jpg``, 1920x620;
+#: - the logo is ``logo.png``, 640x360;
+#: - the header is ``library_header.jpg`` or ``header.jpg``, 460x215.
+#:
+#: The ``<sha1>.jpg`` that sits beside them is a 32x32 icon, not art.
+ART_NAMES = {
+    "cover": ("library_600x900.jpg", "library_capsule.jpg"),
+    "background": ("library_hero.jpg",),
+    "logo": ("logo.png",),
+    "header": ("library_header.jpg", "header.jpg"),
+}
 
 
 @dataclass(frozen=True)
@@ -159,6 +182,62 @@ def installed_apps(steam_dir: Path) -> list[App]:
                 continue
             apps.setdefault(app.appid, app)
     return list(apps.values())
+
+
+@dataclass(frozen=True)
+class Art:
+    """Where each piece of an app's art is. None where Steam has none cached."""
+
+    cover: Path | None = None
+    background: Path | None = None
+    logo: Path | None = None
+    header: Path | None = None
+
+
+def find_art(steam_dir: Path, appid: int) -> Art:
+    """Locate an app's art in Steam's cache. Nothing is copied or downloaded.
+
+    Three layouts, and one app can mix the first two (measured: a cover in a
+    hashed subdirectory, its background loose beside it):
+
+    - ``<appid>/<name>``, loose in the app's directory;
+    - ``<appid>/<hash>/<name>``, one subdirectory per file, which is how
+      Steam stores anything it has fetched recently -- every
+      ``library_capsule.jpg`` here is stored this way;
+    - ``<appid>_<name>``, flat in the cache. What most guides still describe;
+      not one file on this machine is stored like that, but it costs a stat.
+
+    An empty file is passed over: it is what Steam leaves while it is still
+    writing. Where one role has several files -- not seen here, where no app
+    has two -- the newest wins, since the older is the one left behind.
+    """
+    cache = steam_dir / ART_CACHE
+    app_dir = cache / str(appid)
+    found = {}
+    for role, names in ART_NAMES.items():
+        candidates: list[Path] = []
+        for name in names:
+            candidates.append(app_dir / name)
+            candidates.extend(sorted(app_dir.glob(f"*/{name}")))
+            candidates.append(cache / f"{appid}_{name}")
+        found[role] = _newest(candidates)
+    return Art(**found)
+
+
+def _newest(paths: list[Path]) -> Path | None:
+    """The most recently written non-empty file among these, if any exist."""
+    best: tuple[float, Path] | None = None
+    for path in paths:
+        try:
+            info = path.stat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+            continue
+        # Strictly newer, so a tie keeps the earlier layout in the list.
+        if best is None or info.st_mtime > best[0]:
+            best = (info.st_mtime, path)
+    return best[1] if best else None
 
 
 def _text(block: dict, key: str) -> str:
