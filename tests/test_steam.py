@@ -1,5 +1,5 @@
-"""Reading a Steam library: the KeyValues reader, the manifests, the art, and
-telling the games from everything else.
+"""The Steam generator: the KeyValues reader, the manifests, the art, telling
+the games from everything else, and the Pegasus collection it all becomes.
 
 Every fixture is text written here, shaped after files Steam wrote on the
 maintainer's machine. The reader was also run over every text ``.vdf`` and
@@ -9,15 +9,19 @@ cases below (the byte-order mark, CRLF) are what that run turned up.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from padmode import config
-from padmode.metadata import steam, vdf
+from padmode.metadata import pegasus, steam, vdf
 
 #: Trimmed from a real manifest: the nested depot blocks are kept because they
 #: are the part a naive reader gets wrong.
@@ -523,6 +527,217 @@ class TestTheIgnoreList(SteamDirCase):
         # pad from working -- the one outcome this split exists to prevent.
         data = {"metadata": {"steam": {"ignore": {"228980": False}}}}
         self.assertEqual(config.parse(data), config.Config())
+
+
+REPO = Path(__file__).resolve().parent.parent
+JPEG = b"\xff\xd8\xff" + b"\x00" * 20
+#: What a file caught mid-write, or anything that is not a picture, looks like.
+HTML = b"<!DOCTYPE html><html></html>"
+
+
+class TestGenerating(SteamDirCase):
+    """End to end, on a fake Steam directory: two games and a tool."""
+
+    def setUp(self):
+        super().setUp()
+        self.out = self.tmp / "out"
+        self.install(self.steam, 10, name="B Game")
+        self.install(self.steam, 20, name="A Game")
+        self.install(self.steam, 30, name="Proton 99.0")
+        tool_dir = self.steam / "steamapps" / "common" / "Proton 99.0"
+        tool_dir.mkdir(parents=True)
+        (tool_dir / steam.TOOL_MANIFEST).write_text('"manifest" { }')
+        # Only B Game has art: a hashed cover and a loose background.
+        self.cover = self.art("10/abc/library_capsule.jpg", JPEG + b"cover")
+        self.background = self.art("10/library_hero.jpg", JPEG + b"hero")
+
+    def art(self, relative, data, mtime=None):
+        path = self.steam / steam.ART_CACHE / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        if mtime is not None:
+            os.utime(path, (mtime, mtime))
+        return path
+
+    def options(self, **kwargs):
+        return steam.Options(steam_dir=self.steam, out_dir=self.out, **kwargs)
+
+    def generate(self, **kwargs):
+        self.output = io.StringIO()
+        with contextlib.redirect_stdout(self.output):
+            return steam.generate(self.options(**kwargs))
+
+    def metadata(self):
+        return (self.out / pegasus.METADATA_FILE).read_text()
+
+    def test_writes_the_collection(self):
+        with self.assertLogs(steam.log, "WARNING"):  # A Game has no art
+            self.assertEqual(self.generate(), 0)
+        self.assertEqual(self.metadata(), (
+            "collection: Steam\n\n\n"
+            "game: A Game\n"
+            "file: games/20.steam\n"
+            'launch: xdg-open "steam://rungameid/20"\n\n'
+            "game: B Game\n"
+            "file: games/10.steam\n"
+            'launch: xdg-open "steam://rungameid/10"\n'
+            "assets.box_front: art/10_cover.jpg\n"
+            "assets.background: art/10_background.jpg\n"
+        ))
+
+    def test_every_game_has_a_real_file(self):
+        # Pegasus hides an entry whose file is missing (verify-files).
+        with self.assertLogs(steam.log, "WARNING"):
+            self.generate()
+        self.assertTrue((self.out / "games" / "10.steam").is_file())
+        self.assertTrue((self.out / "games" / "20.steam").is_file())
+
+    def test_art_is_copied_not_pointed_at(self):
+        with self.assertLogs(steam.log, "WARNING"):
+            self.generate()
+        self.assertEqual((self.out / "art" / "10_cover.jpg").read_bytes(), JPEG + b"cover")
+        self.assertEqual(
+            (self.out / "art" / "10_background.jpg").read_bytes(), JPEG + b"hero"
+        )
+
+    def test_skipped_apps_are_shown_with_their_reason(self):
+        with self.assertLogs(steam.log, "WARNING"):
+            self.generate()
+        self.assertIn("Proton 99.0 (30): compatibility tool", self.output.getvalue())
+        self.assertNotIn("Proton", self.metadata())
+
+    def test_a_game_without_art_is_named(self):
+        with self.assertLogs(steam.log, "WARNING") as logs:
+            self.generate()
+        self.assertIn("A Game: no cover in Steam's cache", "\n".join(logs.output))
+
+    def test_running_again_copies_nothing(self):
+        with self.assertLogs(steam.log, "WARNING"):
+            self.generate()
+        with mock.patch.object(steam.shutil, "copy2", side_effect=AssertionError):
+            with self.assertLogs(steam.log, "WARNING"):
+                self.assertEqual(self.generate(), 0)
+
+    def test_updated_art_is_copied_again(self):
+        with self.assertLogs(steam.log, "WARNING"):
+            self.generate()
+        self.art("10/abc/library_capsule.jpg", JPEG + b"new cover", mtime=2_000_000_000)
+        with self.assertLogs(steam.log, "WARNING"):
+            self.generate()
+        self.assertEqual(
+            (self.out / "art" / "10_cover.jpg").read_bytes(), JPEG + b"new cover"
+        )
+
+    def test_a_broken_update_keeps_the_good_copy(self):
+        with self.assertLogs(steam.log, "WARNING"):
+            self.generate()
+        self.art("10/abc/library_capsule.jpg", HTML, mtime=2_000_000_000)
+        with self.assertLogs(steam.log, "WARNING") as logs:
+            self.generate()
+        self.assertIn("10_cover.jpg (not an image)", "\n".join(logs.output))
+        self.assertEqual((self.out / "art" / "10_cover.jpg").read_bytes(), JPEG + b"cover")
+        self.assertIn("assets.box_front: art/10_cover.jpg", self.metadata())
+        self.assertEqual(list(self.out.rglob("*.part")), [])
+
+    def test_broken_art_with_no_good_copy_is_not_referenced(self):
+        self.art("10/abc/library_capsule.jpg", HTML)
+        with self.assertLogs(steam.log, "WARNING") as logs:
+            self.generate()
+        self.assertFalse((self.out / "art" / "10_cover.jpg").exists())
+        self.assertNotIn("box_front", self.metadata())
+        self.assertIn("B Game: cover could not be copied", "\n".join(logs.output))
+
+    def test_a_dry_run_touches_nothing(self):
+        self.assertEqual(self.generate(dry_run=True), 0)
+        self.assertFalse(self.out.exists())
+        self.assertIn("game: B Game", self.output.getvalue())
+        self.assertIn("assets.box_front: art/10_cover.jpg", self.output.getvalue())
+
+    def test_no_games_writes_nothing(self):
+        for appid in (10, 20):
+            (self.steam / "steamapps" / f"appmanifest_{appid}.acf").unlink()
+        with self.assertLogs(steam.log, "ERROR"):
+            self.assertEqual(self.generate(), 1)
+        self.assertFalse(self.out.exists())
+
+    def test_no_steam(self):
+        with self.assertLogs(steam.log, "ERROR"):
+            self.assertEqual(
+                steam.generate(steam.Options(steam_dir=self.tmp / "absent")), 1
+            )
+
+    def test_the_ignore_list_comes_from_the_config_file(self):
+        config_file = self.tmp / "config.toml"
+        config_file.write_text("[metadata.steam.ignore]\n10 = true\n30 = false\n")
+        with self.assertLogs(steam.log, "WARNING"):
+            self.generate(config_path=config_file)
+        metadata = self.metadata()
+        self.assertNotIn("B Game", metadata)
+        self.assertIn("game: Proton 99.0", metadata)
+        self.assertIn("B Game (10): ignored in config", self.output.getvalue())
+
+    def test_a_bad_ignore_list_writes_nothing(self):
+        config_file = self.tmp / "config.toml"
+        config_file.write_text("[metadata.steam.ignore]\n10 = 1\n")
+        with self.assertLogs(steam.log, "ERROR"):
+            self.assertEqual(self.generate(config_path=config_file), 1)
+        self.assertFalse(self.out.exists())
+
+
+class TestOptionResolution(unittest.TestCase):
+    def test_flags_then_environment_then_defaults(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            options = steam.Options.resolve()
+        self.assertIsNone(options.steam_dir)
+        self.assertEqual(options.out_dir, Path(steam.DEFAULT_OUT).expanduser())
+        self.assertEqual(options.collection, "Steam")
+
+        env = {"PADMODE_STEAM_DIR": "/env/steam", "PEGASUS_STEAM_OUT": "/env/out"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            options = steam.Options.resolve()
+            self.assertEqual(
+                (options.steam_dir, options.out_dir),
+                (Path("/env/steam"), Path("/env/out")),
+            )
+            options = steam.Options.resolve(
+                steam_dir=Path("/flag/steam"), out_dir=Path("/flag/out")
+            )
+            self.assertEqual(
+                (options.steam_dir, options.out_dir),
+                (Path("/flag/steam"), Path("/flag/out")),
+            )
+
+
+class TestTheCommandLine(SteamDirCase):
+    def run_padmode(self, *args):
+        return subprocess.run(
+            [sys.executable, "-m", "padmode", *args],
+            cwd=REPO, capture_output=True, text=True, check=False,
+        )
+
+    def test_the_generator_is_reachable(self):
+        result = self.run_padmode("metadata", "steam", "--help")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--steam-dir", result.stdout)
+        # Help text is documentation; it must name the real default.
+        self.assertIn(steam.DEFAULT_OUT, result.stdout)
+
+    def test_metadata_lists_it(self):
+        self.assertIn("steam", self.run_padmode("metadata").stdout)
+
+    def test_end_to_end_with_the_global_config_flag(self):
+        # -c is padmode's own flag; the ignore list has to come from that file.
+        self.install(self.steam, 10, name="Kept")
+        self.install(self.steam, 20, name="Hidden")
+        config_file = self.tmp / "config.toml"
+        config_file.write_text("[metadata.steam.ignore]\n20 = true\n")
+        result = self.run_padmode(
+            "-c", str(config_file), "metadata", "steam",
+            "--steam-dir", str(self.steam), "--dry-run",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("game: Kept", result.stdout)
+        self.assertNotIn("game: Hidden", result.stdout)
 
 
 if __name__ == "__main__":

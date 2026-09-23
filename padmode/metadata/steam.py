@@ -1,28 +1,41 @@
 """Steam -> Pegasus metadata.
 
-**Partly built.** What is here reads the library -- where Steam lives, which
-library folders it has, which apps are installed in them -- finds each app's
-art, and tells games from the tools Steam installs beside them. Writing the
-Pegasus file is specified in ``docs/metadata-generators.md`` and not built
-yet, so this is not reachable from ``padmode metadata``.
+Reads the library -- where Steam lives, which library folders it has, which
+apps are installed in them -- tells the games from the tools Steam installs
+beside them, copies each game's art out of Steam's cache, and writes a Pegasus
+collection. ``padmode metadata steam``; see ``docs/metadata-generators.md``.
 
 Steam describes each installed app in an ``appmanifest_<appid>.acf`` file, in
 Valve's KeyValues text format (:mod:`.vdf`). Nothing here talks to Steam or
-the network: the manifests are the whole source of truth.
+the network: the manifests and the art cache are the whole source of truth.
+Re-run it any time: it is idempotent, and art that has not changed is not
+copied again.
 """
 
 from __future__ import annotations
 
+import argparse
 import logging
+import os
+import shutil
 import stat
 import tomllib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import vdf
+from . import pegasus, vdf
+from .images import looks_like_image
 
 log = logging.getLogger(__name__)
+
+DEFAULT_OUT = "~/Games/pegasus-steam"
+DEFAULT_COLLECTION = "Steam"
+
+#: Steam registers a handler for ``steam://`` URLs (``steam.desktop``, here),
+#: so games launch through it rather than through an executable -- the same
+#: shape as Heroic's, and indifferent to which library the game is in.
+LAUNCH_TEMPLATE = 'xdg-open "steam://rungameid/{appid}"'
 
 #: Where Steam lives. ``~/.steam/root`` first: Steam keeps that link pointing
 #: at wherever it is really installed, which is the question being asked. The
@@ -386,3 +399,199 @@ def _int(value: str) -> int:
         return int(value)
     except ValueError:
         return 0
+
+
+@dataclass(frozen=True)
+class Options:
+    """Everything the generator needs to know. Nothing is read from globals."""
+
+    steam_dir: Path | None = None
+    out_dir: Path = Path(DEFAULT_OUT).expanduser()
+    collection: str = DEFAULT_COLLECTION
+    dry_run: bool = False
+    #: padmode's config file, read for ``[metadata.steam.ignore]`` only.
+    #: None means no ignore list at all, which is what the tests want.
+    config_path: Path | None = None
+
+    @classmethod
+    def resolve(
+        cls,
+        steam_dir: Path | None = None,
+        out_dir: Path | None = None,
+        collection: str | None = None,
+        dry_run: bool = False,
+        config_path: Path | None = None,
+    ) -> Options:
+        """Flags first, then the environment, then the defaults.
+
+        Here rather than in the argument parser for the reason given in
+        :meth:`heroic.Options.resolve`: the parser is built on every
+        ``padmode`` invocation, and the daemon must not import this module.
+        """
+        return cls(
+            steam_dir=steam_dir or _env_path("PADMODE_STEAM_DIR"),
+            out_dir=(
+                out_dir
+                or _env_path("PEGASUS_STEAM_OUT")
+                or Path(DEFAULT_OUT).expanduser()
+            ),
+            collection=collection or DEFAULT_COLLECTION,
+            dry_run=dry_run,
+            config_path=config_path,
+        )
+
+
+def copy_art(source: Path | None, dest: Path) -> bool:
+    """Copy one piece of art out of Steam's cache. True if ``dest`` is usable.
+
+    Copied rather than pointed at: Steam's cache is not permanent, and a
+    hashed directory changes name when the art is updated, so a reference
+    into it can go stale between runs. A copy beside the metadata cannot, and
+    keeps the generated library movable, as Heroic's is.
+
+    Copying has its own failure, the one :mod:`.images` describes: a file
+    caught mid-write. So the copy lands beside ``dest`` first and replaces it
+    only once it looks like an image -- a broken new version never replaces a
+    good old one. Art whose size and mtime match the copy (``copy2`` keeps
+    the mtime) is left alone, which is what makes re-running cheap.
+    """
+    if source is None:
+        return False
+    partial = dest.with_name(dest.name + ".part")
+    try:
+        src = source.stat()
+        if dest.is_file():
+            have = dest.stat()
+            if (have.st_size, have.st_mtime_ns) == (src.st_size, src.st_mtime_ns):
+                return True
+        shutil.copy2(source, partial)
+        with partial.open("rb") as copied:
+            if not looks_like_image(copied.read(16)):
+                raise ValueError("not an image")
+        os.replace(partial, dest)
+        return True
+    except (OSError, ValueError) as exc:
+        log.warning("art failed: %s (%s)", dest.name, exc)
+        return dest.is_file()
+    finally:
+        partial.unlink(missing_ok=True)
+
+
+def collect(
+    games: list[App], options: Options, steam_dir: Path
+) -> tuple[list[pegasus.Game], list[str]]:
+    """Turn games into metadata, copying art as it goes.
+
+    Returns the entries and a note for every game left without a cover or a
+    background, so the caller can say which, rather than the frontend showing
+    a blank tile with no explanation.
+    """
+    art_dir = options.out_dir / "art"
+    games_dir = options.out_dir / "games"
+    entries: list[pegasus.Game] = []
+    notes: list[str] = []
+
+    for app in sorted(games, key=lambda a: a.name.lower()):
+        art = find_art(steam_dir, app.appid)
+        found = {"cover": art.cover, "background": art.background}
+        dests = {
+            role: art_dir / f"{app.appid}_{role}{source.suffix}"
+            for role, source in found.items()
+            if source is not None
+        }
+        if options.dry_run:
+            have = {role: role in dests for role in found}
+        else:
+            (games_dir / f"{app.appid}.steam").touch(exist_ok=True)
+            have = {
+                role: role in dests and copy_art(found[role], dests[role])
+                for role in found
+            }
+        for role, source in found.items():
+            if source is None:
+                notes.append(f"{app.name}: no {role} in Steam's cache")
+            elif not have[role]:
+                notes.append(f"{app.name}: {role} could not be copied")
+
+        entries.append(pegasus.Game(
+            title=app.name,
+            file=f"games/{app.appid}.steam",
+            launch=LAUNCH_TEMPLATE.format(appid=app.appid),
+            box_front=f"art/{dests['cover'].name}" if have["cover"] else None,
+            background=(
+                f"art/{dests['background'].name}" if have["background"] else None
+            ),
+        ))
+        print(f"  + {app.name} ({app.appid})")
+    return entries, notes
+
+
+def generate(options: Options) -> int:
+    """Run the generator. Returns a process exit status."""
+    steam_dir = find_steam_dir(options.steam_dir)
+    if steam_dir is None:
+        looked = options.steam_dir or " or ".join(STEAM_CANDIDATES)
+        log.error(
+            "no Steam found (looked in %s). Use --steam-dir if it lives "
+            "somewhere else.", looked,
+        )
+        return 1
+    print(f"Steam          : {steam_dir}")
+
+    try:
+        ignore = load_ignore(options.config_path) if options.config_path else {}
+    except ValueError as exc:
+        log.error("%s", exc)
+        return 1
+
+    apps = installed_apps(steam_dir)
+    games, skipped = split_games(apps, ignore)
+    print(f"installed apps : {len(apps)}, games: {len(games)}")
+    # Every skip is shown, with its reason: a game hidden by mistake should be
+    # one line away from being noticed, and one ignore entry from coming back.
+    for app, reason in sorted(skipped, key=lambda pair: pair[0].name.lower()):
+        print(f"  - {app.name} ({app.appid}): {reason}")
+    if not games:
+        # Overwriting good metadata with an empty collection because Steam was
+        # mid-update is worse than doing nothing -- the Heroic rule.
+        log.error("no games installed, so there is nothing to write")
+        return 1
+
+    if not options.dry_run:
+        for directory in (options.out_dir / "art", options.out_dir / "games"):
+            directory.mkdir(parents=True, exist_ok=True)
+
+    entries, notes = collect(games, options, steam_dir)
+    if options.dry_run:
+        print(pegasus.render(entries, options.collection))
+        return 0
+
+    path = pegasus.write(entries, options.out_dir, options.collection)
+    print(f"\nwrote {path}")
+    for note in notes:
+        log.warning("%s", note)
+    print(f"\nIn Pegasus: Settings -> Set game directories -> add:\n  "
+          f"{options.out_dir}")
+    # Measured: Pegasus ships a Steam data source of its own, on by default
+    # here, and it knows nothing about the filter. With both on, every game
+    # is listed twice. Its settings are the user's, so we say it, not do it.
+    print("and turn off Pegasus's own Steam data source, or every game is "
+          "listed twice\n  (providers.steam.enabled: false in its settings.txt)")
+    return 0
+
+
+def main(args: argparse.Namespace) -> int:
+    from ..config import default_path
+
+    return generate(Options.resolve(
+        steam_dir=args.steam_dir,
+        out_dir=args.out,
+        collection=args.collection,
+        dry_run=args.dry_run,
+        config_path=args.config or default_path(),
+    ))
+
+
+def _env_path(name: str) -> Path | None:
+    value = os.environ.get(name)
+    return Path(value).expanduser() if value else None

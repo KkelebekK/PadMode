@@ -4,8 +4,7 @@ Reference for `padmode metadata`. These are **not** part of the daemon and must
 never be imported by it (CLAUDE.md §2, §7). They are batch tools that read a
 game library and write frontend metadata.
 
-Heroic is built (v0.4). Steam is partly built: reading the library works,
-the rest is specified below and not built.
+Heroic is built (v0.4). Steam is built (v0.6, not yet released).
 
 ---
 
@@ -77,9 +76,18 @@ step, and reading it too early gets a partial file.
 
 ## Steam
 
-**Partly built.** Reading the library, locating art and filtering are done
-(`metadata/steam.py`, `metadata/vdf.py`); the output below is still
-specification, and nothing is reachable from `padmode metadata` yet.
+```bash
+padmode metadata steam [--steam-dir PATH] [--out PATH]
+                       [--collection NAME] [--dry-run]
+```
+
+Flags win, then `$PADMODE_STEAM_DIR` / `$PEGASUS_STEAM_OUT`, then the defaults
+(autodetect, and `~/Games/pegasus-steam`). `--dry-run` prints the metadata and
+the list of skipped apps, and touches nothing. The ignore list comes from
+padmode's config file — `-c` if given, the usual path if not.
+
+`metadata/steam.py` does the work, `metadata/vdf.py` reads Valve's format,
+`metadata/images.py` holds the image check both generators share.
 
 **Finding Steam:** `~/.steam/root` first — Steam keeps that link pointing at
 its real install — then `~/.local/share/Steam`, then the Flatpak's
@@ -143,12 +151,20 @@ On the real library, all 7 games get a cover and a background. **None of the
 tempting filter signal — but a game Steam has not shown yet has no art cached
 either, so it would vanish until it was. Recorded for the filter, not used.
 
-**Open for the output step:** point Pegasus at the files in Steam's cache, or
-copy them next to the metadata (as Heroic does)? Steam's cache is not
-permanent — hashed directory names change when art is updated, and the index
-records a `last_cleanup_time` — so a reference into it can go stale between
-runs. Copying costs a validation step (a partial copy is a broken cover until
-someone deletes it, which is the Heroic lesson again).
+**Art is copied, not pointed at.** Steam's cache is not permanent — a hashed
+directory changes name when the art is updated, and the index records a
+`last_cleanup_time` — so a reference into it can go stale between runs. A copy
+beside the metadata cannot, and keeps the generated library movable, like
+Heroic's. Cover and background land in `art/<appid>_cover.jpg` and
+`art/<appid>_background.jpg`.
+
+Copying brings back the Heroic lesson in a new form: a file caught while Steam
+is still writing it, saved as `.jpg`, is a broken cover until someone deletes
+it. So each copy lands as `<name>.part`, is checked for an image signature,
+and only then replaces the old file — **a broken new version never replaces a
+good old one**. Art whose size and mtime match the copy is not copied again.
+Measured on the real library: the first run copies 14 files in 0.08 s, all
+byte-identical to their source; the second copies none, in 0.06 s.
 
 **Filtering:** Proton builds, the Steam Linux Runtimes and the Steamworks
 redistributables are installed apps like any other, and would show up as fake
@@ -194,9 +210,37 @@ nothing to do with it. Keys are appids — the number in the store URL and in
 `appmanifest_<appid>.acf` — and values must be booleans; anything else is an
 error, as it is everywhere else in the config.
 
-**Reuse:** `metadata/pegasus.py` already writes the file; a Steam generator
-supplies `pegasus.Game` entries and nothing else. That split is why the writer
-is its own module.
+**Launch line:** Steam registers a handler for `steam://` URLs, so entries
+launch through it, the same shape as Heroic's:
+
+```
+xdg-open "steam://rungameid/<appid>"
+```
+
+**Refusing to write an empty file**, as Heroic does — and here that includes a
+library where every installed app was filtered out.
+
+**Reuse:** `metadata/pegasus.py` writes the file; the Steam generator supplies
+`pegasus.Game` entries and nothing else. That split is why the writer is its
+own module.
+
+**Pegasus ships its own Steam data source, and it does not filter.** With it
+on and our output off, Pegasus reported *10 games* for this library's 7 — at
+least three of its entries are tools. With both on, it reported 19 (7 + 10,
+plus 2 from Lutris): every game twice. The generator says so at the end of
+every run and leaves the setting alone, since Pegasus's settings are the
+user's: `providers.steam.enabled: false` in `settings.txt` turns it off.
+
+**Validated against Pegasus** (`alpha16-105-g6b322063`), both ways, as the
+notes below require. The real library's output: neither warning, and the
+`Steam` collection loaded. The same metadata with the `games/*.steam` files
+deleted: seven "doesn't seem to exist" warnings and `The collection 'Steam'
+has no valid games, ignored`. Pegasus ran with `QT_QPA_PLATFORM=offscreen` and
+an isolated `XDG_CONFIG_HOME`, so no window opened.
+
+**Not built:** a path unit to re-run on library changes, as Heroic has. Steam
+writes into `steamapps/` constantly while downloading, so "watch the
+directory" is not the answer it was for three JSON files.
 
 ## Pegasus output notes
 
@@ -205,8 +249,9 @@ Only relevant to the Pegasus writer; other frontends will want their own.
 - Pegasus accepts several metadata filenames. We write `metadata.pegasus.txt`
   and only that one. A mismatch between docs and code here wastes an afternoon.
 - Each game needs a real file to exist, or Pegasus hides it when
-  `general.verify-files` is on (the default). The generator touches an empty
-  `games/<key>.heroic` per entry for exactly this reason.
+  `general.verify-files` is on (the default). The generators touch an empty
+  `games/<key>.heroic` or `games/<appid>.steam` per entry for exactly this
+  reason.
 - Values are single-line. Store descriptions routinely contain newlines, so
   they are collapsed; a description that wraps turns the rest of itself into
   unparseable keys.

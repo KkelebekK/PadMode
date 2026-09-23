@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import pegasus
+from .images import looks_like_image
 
 log = logging.getLogger(__name__)
 
@@ -45,16 +46,6 @@ TIMEOUT = 30
 
 #: Some CDNs answer a bare urllib request with a 403.
 USER_AGENT = "Mozilla/5.0"
-
-#: Bytes that start a real image. Launcher CDNs return HTML error pages with a
-#: 200 status, and an HTML file saved as .jpg is a broken cover in the
-#: frontend forever, because the next run sees the file and skips it.
-SIGNATURES = (
-    (0, b"\xff\xd8\xff"),  # JPEG
-    (0, b"\x89PNG\r\n\x1a\n"),  # PNG
-    (0, b"GIF8"),  # GIF
-    (8, b"WEBP"),  # WebP, after a RIFF header
-)
 
 #: Fetches a URL and returns its bytes. Injected in tests, which must never
 #: reach the network.
@@ -141,13 +132,6 @@ def installed_games(config_dir: Path) -> list[dict]:
 def sanitize(name: object) -> str:
     """A filename-safe key. App ids are opaque strings, not always tidy ones."""
     return "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(name))
-
-
-def looks_like_image(data: bytes) -> bool:
-    """True if these bytes start like an image we can trust."""
-    return any(
-        data[offset:offset + len(sig)] == sig for offset, sig in SIGNATURES
-    )
 
 
 def _fetch(url: str) -> bytes:

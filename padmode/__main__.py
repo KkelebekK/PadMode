@@ -149,6 +149,10 @@ def cmd_metadata(args: argparse.Namespace, config: Config) -> int:
     if args.generator is None:
         args.metadata_parser.print_help()
         return 2
+    if args.generator == "steam":
+        from .metadata import steam
+
+        return steam.main(args)
     from .metadata import heroic
 
     return heroic.main(args)
@@ -403,6 +407,27 @@ def _add_metadata_parser(sub) -> None:
     heroic.add_argument(
         "--dry-run", action="store_true",
         help="print the metadata instead of writing anything or fetching art",
+    )
+    steam = generators.add_parser(
+        "steam", help="Steam -> Pegasus",
+    )
+    steam.add_argument(
+        "--steam-dir", type=Path, metavar="PATH",
+        help="Steam's directory, the one holding steamapps/ "
+             "(default: autodetect, or $PADMODE_STEAM_DIR)",
+    )
+    steam.add_argument(
+        "--out", type=Path, metavar="PATH",
+        help="where to write metadata and art "
+             "(default: $PEGASUS_STEAM_OUT, else ~/Games/pegasus-steam)",
+    )
+    steam.add_argument(
+        "--collection", metavar="NAME",
+        help="collection name in the frontend (default: Steam)",
+    )
+    steam.add_argument(
+        "--dry-run", action="store_true",
+        help="print the metadata instead of writing anything or copying art",
     )
     metadata.set_defaults(func=cmd_metadata, metadata_parser=metadata)
 

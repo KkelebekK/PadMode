@@ -315,12 +315,13 @@ the pad in use is virtual, it exits non-zero and tells you what to pin.
 
 ### Game libraries
 
-If you use Heroic and a frontend that reads Pegasus metadata, padmode can
-generate it:
+If you use Heroic or Steam and a frontend that reads Pegasus metadata, padmode
+can generate it:
 
 ```bash
 padmode metadata heroic --dry-run   # see what it would write
 padmode metadata heroic             # write it, and fetch cover art
+padmode metadata steam              # the same for Steam
 ```
 
 It reads Heroic's own library cache, downloads cover and background art once,
@@ -331,6 +332,21 @@ cannot register the directory for you.
 
 `install.sh` offers to keep it current automatically whenever you install or
 remove a game. This is a batch tool, entirely separate from the daemon.
+
+The Steam generator reads Steam's own manifests and copies art out of Steam's
+cache, so nothing is downloaded. It leaves out Proton, the Steam Linux
+Runtimes and the like, and prints each app it skipped and why. To hide
+something else, or show something it hid:
+
+```toml
+[metadata.steam.ignore]
+1234567 = true    # hide this appid
+228980 = false    # show it even though padmode would not
+```
+
+Pegasus has a Steam data source of its own that lists those tools as games;
+turn it off, or every game appears twice. There is no automatic re-run for
+Steam yet — run it after installing or removing a game.
 
 Logs go to the journal: `journalctl --user -u padmode -f`
 
@@ -507,7 +523,7 @@ and quietly ignoring half your bindings.
 | ✅ v0.3 | Window backends, in-game overlays, return-to-game | KDE + X11 |
 | ✅ **v0.4** | Frontend button and fallback, Heroic metadata generator | KDE + X11 |
 | ✅ **v0.5** | On-screen keyboard you drive with the pad, like a console | KDE Wayland only |
-| v0.6 | Steam metadata generator | No |
+| v0.6 | Steam metadata generator *(built, not yet released)* | No |
 | v0.7 | Gamepad unlock (opt-in, off by default) | Screensaver D-Bus |
 
 v0.1 and v0.2 are deliberately useful on their own, on any desktop. Overlays
