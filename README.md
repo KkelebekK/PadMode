@@ -525,6 +525,7 @@ and quietly ignoring half your bindings.
 | ✅ **v0.5** | On-screen keyboard you drive with the pad, like a console | KDE Wayland only |
 | v0.6 | Steam metadata generator *(built, not yet released)* | No |
 | v0.7 | Gamepad unlock (opt-in, off by default) | Screensaver D-Bus |
+| v0.8 | Settings GUI — change the config from a window, with the pad | No |
 
 v0.1 and v0.2 are deliberately useful on their own, on any desktop. Overlays
 are the first feature that has to activate a window, which is where Wayland

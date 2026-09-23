@@ -201,12 +201,33 @@ Core stays frontend-agnostic: nothing here knows what Pegasus is.
 | ~~**v0.2**~~ ✅ | uinput virtual device, desktop mode (pad as mouse), return button | **None** — confirmed: no window code was needed |
 | ~~**v0.3**~~ ✅ | Window backends, overlay mode, return-to-game | KDE + X11 |
 | ~~**v0.4**~~ ✅ | Frontend integration (return target), Heroic metadata generator | KDE + X11 |
-| **v0.5** 🔨 | On-screen keyboard, console style (`docs/on-screen-keyboard.md`) | **KDE Wayland only** — layer-shell, not window activation. X11 was dropped from this version: it needs override-redirect, which is different code, not a flag. The keyboard is therefore *narrower* than overlays, and the README says so |
+| ~~**v0.5**~~ ✅ | On-screen keyboard, console style (`docs/on-screen-keyboard.md`) | **KDE Wayland only** — layer-shell, not window activation. X11 was dropped from this version: it needs override-redirect, which is different code, not a flag. The keyboard is therefore *narrower* than overlays, and the README says so |
 | **v0.6** | Steam metadata generator (built; not released) | None |
 | **v0.7** | Unlock module (opt-in, off by default) | Screensaver D-Bus |
+| **v0.8** | Settings GUI: edit the config from a window, drivable with the pad | None — an ordinary window |
 
 Do not pull work earlier in this list. The point of the ordering is that v0.1
 and v0.2 are *universally useful on their own*.
+
+**v0.8, the settings GUI** (added 2026-09-23, not yet specified). Today every
+setting — bindings, overlays, the frontend, the Steam ignore list — means
+editing `config.toml` by hand. What is already decided elsewhere, so it is not
+re-derived:
+
+- It **draws, so it is a separate process** (§2), and its toolkit is an
+  optional runtime dependency, probed like the keyboard's: GTK4 missing means
+  no GUI, never a daemon that fails to start.
+- It **saves only what the loaders accept**: `config.parse` for the daemon's
+  sections, `steam.parse_ignore` for `[metadata.steam.ignore]`. Bad config is
+  a startup failure for the daemon (the rule at the top of `config.py`), so a
+  GUI that can write a file the daemon refuses would turn a typo into a pad
+  that does nothing.
+- It is **not a game launcher.** "Should we ship a frontend of our own?"
+  (§10) is a different question and stays open.
+
+The known hard part: **the stdlib reads TOML but cannot write it.** Writing
+the file back without losing the user's comments and layout needs either a
+small writer for our own schema, or edits made in place. Decide that first.
 
 ---
 
