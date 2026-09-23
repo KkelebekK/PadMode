@@ -1,8 +1,8 @@
 """Writing Pegasus metadata files.
 
 Split from the scrapers because the launcher and the frontend are independent
-choices: the Steam generator (specified in ``docs/metadata-generators.md``,
-not yet built) writes this same format from a completely different source, and
+choices: the Steam generator (being built, see ``docs/metadata-generators.md``)
+writes this same format from a completely different source, and
 a second frontend would want a different writer from the same scrape.
 
 Pegasus accepts several filenames for this file. We write

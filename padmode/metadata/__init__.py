@@ -10,6 +10,6 @@ that importing :mod:`padmode.daemon` never pulls this package in. ``padmode
 metadata`` imports it lazily, inside the subcommand, which is the only place
 that is allowed to.
 
-See ``docs/metadata-generators.md`` for the design, and the Steam generator
-that is specified but not yet built.
+See ``docs/metadata-generators.md`` for the design, and for the Steam
+generator, which is partly built.
 """

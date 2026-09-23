@@ -4,7 +4,8 @@ Reference for `padmode metadata`. These are **not** part of the daemon and must
 never be imported by it (CLAUDE.md §2, §7). They are batch tools that read a
 game library and write frontend metadata.
 
-Heroic is built (v0.4). Steam is specified below and not built.
+Heroic is built (v0.4). Steam is partly built: reading the library works,
+the rest is specified below and not built.
 
 ---
 
@@ -76,11 +77,38 @@ step, and reading it too early gets a partial file.
 
 ## Steam
 
-**Not built.** This section is the specification.
+**Partly built.** Reading the library is done (`metadata/steam.py`,
+`metadata/vdf.py`); art, filtering and output below are still specification,
+and nothing is reachable from `padmode metadata` yet.
 
-**Source:** `~/.local/share/Steam/steamapps/appmanifest_*.acf` (VDF, not JSON).
-A small VDF reader has to be written by hand: adding a dependency for it would
-break the stdlib-only promise (CLAUDE.md §2).
+**Finding Steam:** `~/.steam/root` first — Steam keeps that link pointing at
+its real install — then `~/.local/share/Steam`, then the Flatpak's
+`~/.var/app/com.valvesoftware.Steam/.local/share/Steam`.
+
+**Source:** `steamapps/appmanifest_*.acf`, one per app, in Valve's KeyValues
+text format (VDF, not JSON). The reader is written by hand: a dependency for it
+would break the stdlib-only promise (CLAUDE.md §2). It was run over every text
+`.vdf`/`.acf` Steam wrote on the development machine — 299 files, all parsed.
+That run found the one thing the fixtures had not: **30 of them start with a
+UTF-8 byte-order mark** (Steam's controller templates), which Python does not
+count as whitespace, so an unstripped BOM reads as a key and misaligns every
+pair after it. 87 use CRLF, which needs nothing.
+
+**Library folders:** games on another drive are not under the Steam directory
+at all. `steamapps/libraryfolders.vdf` lists every library; each numbered entry
+holds a `path`. An older layout mapped the number straight to the path and
+mixed in non-numeric bookkeeping keys — not seen here, accepted anyway. Steam's
+own directory is always read, even when that file is missing or broken, and a
+library whose directory is gone (an unmounted drive) is skipped with a warning.
+
+**Installed means a bit, not a value.** A manifest carries `StateFlags`; bit 4
+is "all files on disk". Compare with `& 4`, never `== 4`: Proton Experimental
+reads **6** here — installed, with an update waiting.
+
+Measured on the development machine: 16 manifests, 16 installed, read in
+20 ms. **Nine of the sixteen are not games** (four Proton builds, four Steam
+Linux Runtimes, Steamworks Common Redistributables) — which is the filter's
+job, below, and why it cannot be an afterthought.
 
 **Art:** `~/.local/share/Steam/appcache/librarycache/`. **Newer Steam versions
 use a subdirectory per appid**, not the flat `<appid>_library_600x900.jpg`
