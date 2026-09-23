@@ -1,4 +1,5 @@
-"""Reading a Steam library: the KeyValues reader, the manifests, and the art.
+"""Reading a Steam library: the KeyValues reader, the manifests, the art, and
+telling the games from everything else.
 
 Every fixture is text written here, shaped after files Steam wrote on the
 maintainer's machine. The reader was also run over every text ``.vdf`` and
@@ -15,6 +16,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from padmode import config
 from padmode.metadata import steam, vdf
 
 #: Trimmed from a real manifest: the nested depot blocks are kept because they
@@ -387,6 +389,140 @@ class TestArt(SteamDirCase):
     def test_a_directory_with_the_right_name_is_not_art(self):
         (self.steam / steam.ART_CACHE / "10" / "library_hero.jpg").mkdir(parents=True)
         self.assertIsNone(self.find().background)
+
+
+class TestTellingGamesApart(SteamDirCase):
+    def app(self, appid=10, name="A Game", installdir=None, library=None):
+        installdir = name if installdir is None else installdir
+        library = library or self.steam
+        (library / "steamapps" / "common" / installdir).mkdir(parents=True, exist_ok=True)
+        return steam.App(appid, name, installdir, library, 4)
+
+    def tool(self, appid=20, name="Proton 12.0", **kwargs):
+        app = self.app(appid, name, **kwargs)
+        install = app.library / "steamapps" / "common" / app.installdir
+        (install / steam.TOOL_MANIFEST).write_text('"manifest" { "version" "2" }')
+        return app
+
+    def test_a_game_is_kept(self):
+        self.assertIsNone(steam.skip_reason(self.app(), {}))
+
+    def test_a_compatibility_tool_is_recognised_by_its_manifest(self):
+        # Not by name: a Proton that does not exist yet is caught too.
+        self.assertEqual(steam.skip_reason(self.tool(), {}), "compatibility tool")
+
+    def test_the_tool_manifest_is_looked_for_in_the_apps_own_library(self):
+        drive = self.library("drive")
+        self.tool(installdir="Shared")  # same directory name, other library
+        app = self.app(installdir="Shared", library=drive)
+        self.assertIsNone(steam.skip_reason(app, {}))
+
+    def test_no_install_directory_is_not_a_tool(self):
+        # Otherwise steamapps/common itself would be asked for a manifest.
+        (self.steam / "steamapps" / "common").mkdir(parents=True, exist_ok=True)
+        (self.steam / "steamapps" / "common" / steam.TOOL_MANIFEST).write_text("")
+        app = steam.App(10, "Nameless", "", self.steam, 4)
+        self.assertFalse(steam.is_tool(app))
+
+    def test_the_redistributables_are_ignored_by_default(self):
+        app = self.app(228980, "Steamworks Common Redistributables", "Steamworks Shared")
+        self.assertEqual(
+            steam.skip_reason(app, {}), steam.DEFAULT_IGNORE[228980]
+        )
+
+    def test_a_dedicated_server(self):
+        app = self.app(name="StarRupture Dedicated Server")
+        self.assertEqual(steam.skip_reason(app, {}), "dedicated server")
+        # The suffix, not the words anywhere.
+        self.assertIsNone(steam.skip_reason(self.app(name="Dedicated Server Tycoon"), {}))
+
+    def test_the_user_can_hide_anything(self):
+        self.assertEqual(
+            steam.skip_reason(self.app(appid=10), {10: True}), "ignored in config"
+        )
+
+    def test_the_user_can_show_anything(self):
+        # false beats the default list, the tool check and the name check alike.
+        for app in (
+            self.app(228980, "Steamworks Common Redistributables", "Shared"),
+            self.tool(),
+            self.app(30, "X Dedicated Server"),
+        ):
+            with self.subTest(app=app.name):
+                self.assertIsNone(steam.skip_reason(app, {app.appid: False}))
+
+    def test_another_apps_entry_changes_nothing(self):
+        self.assertEqual(steam.skip_reason(self.tool(appid=20), {10: False}),
+                         "compatibility tool")
+
+    def test_split_keeps_order_and_says_why(self):
+        game, tool, server = (
+            self.app(1, "B Game"), self.tool(2), self.app(3, "Z Dedicated Server")
+        )
+        other = self.app(4, "A Game")
+        games, skipped = steam.split_games([game, tool, server, other], {})
+        self.assertEqual(games, [game, other])
+        self.assertEqual(
+            skipped, [(tool, "compatibility tool"), (server, "dedicated server")]
+        )
+
+
+class TestTheIgnoreList(SteamDirCase):
+    def parse(self, table):
+        return steam.parse_ignore({"metadata": {"steam": {"ignore": table}}})
+
+    def test_absent_is_empty(self):
+        self.assertEqual(steam.parse_ignore({}), {})
+        self.assertEqual(steam.parse_ignore({"metadata": {}}), {})
+        self.assertEqual(steam.parse_ignore({"metadata": {"steam": {}}}), {})
+
+    def test_appids_and_booleans(self):
+        self.assertEqual(
+            self.parse({"228980": False, "1234567": True}),
+            {228980: False, 1234567: True},
+        )
+
+    def test_mistakes_are_errors_not_silence(self):
+        for data, says in (
+            ({"metadata": []}, "[metadata]"),
+            ({"metadata": {"steam": 1}}, "[metadata.steam]"),
+            ({"metadata": {"steam": {"ignroe": {}}}}, "ignroe"),
+            ({"metadata": {"steam": {"ignore": [228980]}}}, "table of appid"),
+            ({"metadata": {"steam": {"ignore": {"Proton": True}}}}, "not an appid"),
+            ({"metadata": {"steam": {"ignore": {"10": 1}}}}, "true (hide it)"),
+            ({"metadata": {"steam": {"ignore": {"10": "yes"}}}}, "true (hide it)"),
+        ):
+            with self.subTest(data=data):
+                with self.assertRaises(ValueError) as caught:
+                    steam.parse_ignore(data)
+                self.assertIn(says, str(caught.exception))
+
+    def test_a_missing_file_is_an_empty_list(self):
+        self.assertEqual(steam.load_ignore(self.tmp / "absent.toml"), {})
+
+    def test_from_the_config_file(self):
+        path = self.tmp / "config.toml"
+        path.write_text(
+            "[general]\nvolume_step = 5\n\n"
+            "[metadata.steam.ignore]\n228980 = false\n1234567 = true\n"
+        )
+        self.assertEqual(steam.load_ignore(path), {228980: False, 1234567: True})
+
+    def test_file_errors_name_the_file(self):
+        path = self.tmp / "config.toml"
+        for text in ("[metadata.steam.ignore\n", "[metadata.steam.ignore]\nx = true\n"):
+            with self.subTest(text=text):
+                path.write_text(text)
+                with self.assertRaises(ValueError) as caught:
+                    steam.load_ignore(path)
+                self.assertIn(str(path), str(caught.exception))
+
+    def test_the_daemon_does_not_choke_on_it(self):
+        # The section lives in the daemon's file. If config.parse ever starts
+        # rejecting tables it does not know, a Steam ignore list would stop the
+        # pad from working -- the one outcome this split exists to prevent.
+        data = {"metadata": {"steam": {"ignore": {"228980": False}}}}
+        self.assertEqual(config.parse(data), config.Config())
 
 
 if __name__ == "__main__":

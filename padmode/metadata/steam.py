@@ -1,10 +1,10 @@
 """Steam -> Pegasus metadata.
 
 **Partly built.** What is here reads the library -- where Steam lives, which
-library folders it has, which apps are installed in them -- and finds each
-app's art. Filtering out runtimes and tools, and writing the Pegasus file, are
-specified in ``docs/metadata-generators.md`` and not built yet, so this is not
-reachable from ``padmode metadata``.
+library folders it has, which apps are installed in them -- finds each app's
+art, and tells games from the tools Steam installs beside them. Writing the
+Pegasus file is specified in ``docs/metadata-generators.md`` and not built
+yet, so this is not reachable from ``padmode metadata``.
 
 Steam describes each installed app in an ``appmanifest_<appid>.acf`` file, in
 Valve's KeyValues text format (:mod:`.vdf`). Nothing here talks to Steam or
@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import logging
 import stat
+import tomllib
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,6 +60,24 @@ ART_NAMES = {
     "logo": ("logo.png",),
     "header": ("library_header.jpg", "header.jpg"),
 }
+
+#: The file a compatibility tool keeps in its install directory, telling Steam
+#: how to run games *through* it. Measured here: every Proton build and every
+#: Steam Linux Runtime has one (8 of 8), and no game does (0 of 7). It catches
+#: the next Proton without anyone adding its name or appid to a list.
+TOOL_MANIFEST = "toolmanifest.vdf"
+
+#: Apps that are not games and carry no structural sign of it, by appid, with
+#: the reason reported when one is skipped. Defaults, merged with the user's
+#: ``[metadata.steam.ignore]`` -- see :func:`skip_reason`.
+DEFAULT_IGNORE: dict[int, str] = {
+    228980: "Steamworks redistributables",
+}
+
+#: Valve names a game's server "<game> Dedicated Server". It installs like any
+#: app and has no tool manifest; one was installed on this machine (its
+#: directory is still in ``steamapps/common``).
+SERVER_SUFFIX = " dedicated server"
 
 
 @dataclass(frozen=True)
@@ -238,6 +258,121 @@ def _newest(paths: list[Path]) -> Path | None:
         if best is None or info.st_mtime > best[0]:
             best = (info.st_mtime, path)
     return best[1] if best else None
+
+
+def is_tool(app: App) -> bool:
+    """True if Steam runs games through this app (Proton, the runtimes)."""
+    if not app.installdir:
+        return False
+    install = app.library / "steamapps" / "common" / app.installdir
+    return (install / TOOL_MANIFEST).is_file()
+
+
+def skip_reason(app: App, ignore: Mapping[int, bool]) -> str | None:
+    """Why this app is not a game, or None if it is one.
+
+    ``ignore`` is the user's ``[metadata.steam.ignore]``, and it is asked
+    first, because it overrides everything below it in both directions:
+    ``true`` hides any app, ``false`` shows one that a default or a check
+    would have hidden. That is how bindings work too -- good defaults, and
+    ``false`` to take one back.
+    """
+    if app.appid in ignore:
+        return "ignored in config" if ignore[app.appid] else None
+    if app.appid in DEFAULT_IGNORE:
+        return DEFAULT_IGNORE[app.appid]
+    if is_tool(app):
+        return "compatibility tool"
+    if app.name.lower().endswith(SERVER_SUFFIX):
+        return "dedicated server"
+    return None
+
+
+def split_games(
+    apps: Iterable[App], ignore: Mapping[int, bool]
+) -> tuple[list[App], list[tuple[App, str]]]:
+    """The games, and everything else with the reason it was left out.
+
+    The skipped list is returned rather than logged so the caller can show it:
+    an app hidden by mistake should be one line of output away from being
+    noticed, not missing without a trace.
+    """
+    games: list[App] = []
+    skipped: list[tuple[App, str]] = []
+    for app in apps:
+        reason = skip_reason(app, ignore)
+        if reason is None:
+            games.append(app)
+        else:
+            skipped.append((app, reason))
+    return games, skipped
+
+
+def load_ignore(path: Path) -> dict[int, bool]:
+    """``[metadata.steam.ignore]`` from padmode's config file.
+
+    Read here rather than by the daemon's config loader, which ignores the
+    ``[metadata]`` table entirely. A typo in the ignore list should stop this
+    generator with a message, not stop the daemon -- the pad has nothing to do
+    with it. A missing file is an empty list.
+    """
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise ValueError(f"cannot read {path}: {exc}") from exc
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except ValueError as exc:  # TOMLDecodeError and UnicodeDecodeError both
+        raise ValueError(f"{path} is not valid TOML: {exc}") from exc
+    try:
+        return parse_ignore(data)
+    except ValueError as exc:
+        raise ValueError(f"{path}: {exc}") from exc
+
+
+def parse_ignore(data: Mapping) -> dict[int, bool]:
+    """Validate the ignore list in already-parsed TOML. Strict, like the config.
+
+    ::
+
+        [metadata.steam.ignore]
+        228980 = false    # show the redistributables after all
+        1234567 = true    # hide this one
+    """
+    metadata = data.get("metadata", {})
+    if not isinstance(metadata, dict):
+        raise ValueError("[metadata] must be a table")
+    section = metadata.get("steam", {})
+    if not isinstance(section, dict):
+        raise ValueError("[metadata.steam] must be a table")
+    unknown = sorted(set(section) - {"ignore"})
+    if unknown:
+        raise ValueError(
+            f"[metadata.steam]: unknown key {', '.join(map(repr, unknown))}. "
+            "Known: ignore"
+        )
+    table = section.get("ignore", {})
+    if not isinstance(table, dict):
+        raise ValueError(
+            "metadata.steam.ignore must be a table of appid = true/false, e.g.\n"
+            "  [metadata.steam.ignore]\n  228980 = false"
+        )
+    ignore: dict[int, bool] = {}
+    for key, value in table.items():
+        if not key.isdigit():
+            raise ValueError(
+                f"metadata.steam.ignore: {key!r} is not an appid. Use the "
+                "number, which is in the app's store URL and its manifest name"
+            )
+        if not isinstance(value, bool):
+            raise ValueError(
+                f"metadata.steam.ignore.{key} must be true (hide it) or "
+                "false (show it even if padmode would hide it)"
+            )
+        ignore[int(key)] = value
+    return ignore
 
 
 def _text(block: dict, key: str) -> str:

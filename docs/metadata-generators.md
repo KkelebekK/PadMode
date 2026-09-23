@@ -77,8 +77,8 @@ step, and reading it too early gets a partial file.
 
 ## Steam
 
-**Partly built.** Reading the library and locating art are done
-(`metadata/steam.py`, `metadata/vdf.py`); filtering and output below are still
+**Partly built.** Reading the library, locating art and filtering are done
+(`metadata/steam.py`, `metadata/vdf.py`); the output below is still
 specification, and nothing is reachable from `padmode metadata` yet.
 
 **Finding Steam:** `~/.steam/root` first — Steam keeps that link pointing at
@@ -150,10 +150,49 @@ records a `last_cleanup_time` — so a reference into it can go stale between
 runs. Copying costs a validation step (a partial copy is a broken cover until
 someone deletes it, which is the Heroic lesson again).
 
-**Filtering:** Proton builds, Steam Linux Runtime, Steamworks Common
-Redistributables and similar appear as ordinary entries and must be dropped, or
-they show up as fake games. Use a heuristic plus a user-editable ignore list —
-good defaults, fully overridable, same as bindings.
+**Filtering:** Proton builds, the Steam Linux Runtimes and the Steamworks
+redistributables are installed apps like any other, and would show up as fake
+games. On the development machine they are **9 of 16** installed apps.
+`skip_reason` asks, in order, and the first answer wins:
+
+1. **The user's ignore list.** `true` hides any app; `false` shows one that
+   anything below would hide. Good defaults, fully overridable — the same
+   shape as bindings, where `false` takes a default back.
+2. **A default list** by appid, for apps with no structural sign of being a
+   tool. Today that is one entry: 228980, Steamworks Common Redistributables.
+3. **A `toolmanifest.vdf` in the install directory.** That file tells Steam
+   how to run games *through* the app — it is what makes Proton Proton.
+   Measured: 8 of 8 Proton builds and runtimes have it, 0 of 7 games do. It
+   catches the next Proton with no one adding its name or appid anywhere,
+   which a name pattern would not.
+4. **A name ending in "Dedicated Server"**, Valve's naming for game servers,
+   which install like apps and have no tool manifest. None is installed now,
+   but one was (its directory is still in `steamapps/common`).
+
+Result on the real library: 7 games kept, 9 skipped — 8 as compatibility
+tools, the redistributables by the default list. Skipped apps come back with
+their reason, so the output step can show them: an app hidden by mistake
+should be one line away from being noticed.
+
+Considered and not used: the binary `appinfo.vdf` knows each app's real type
+(game, tool, …) but is a second, binary, undocumented format to parse and
+keep up with; and "has no cover", which fits all 9 here but would also hide
+any game Steam has not displayed yet.
+
+The ignore list lives in padmode's own config file:
+
+```toml
+[metadata.steam.ignore]
+228980 = false    # show the redistributables after all
+1234567 = true    # hide this one
+```
+
+It is read by the generator, **not** by the daemon's config loader, which
+ignores `[metadata]` entirely (a test holds it to that). A typo in the list
+should stop the generator with a message, not stop the daemon: the pad has
+nothing to do with it. Keys are appids — the number in the store URL and in
+`appmanifest_<appid>.acf` — and values must be booleans; anything else is an
+error, as it is everywhere else in the config.
 
 **Reuse:** `metadata/pegasus.py` already writes the file; a Steam generator
 supplies `pegasus.Game` entries and nothing else. That split is why the writer
