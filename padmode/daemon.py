@@ -33,6 +33,10 @@ from .osk import protocol as osk_protocol
 
 log = logging.getLogger(__name__)
 
+#: What the reader yields when a watched descriptor is readable --
+#: ``padmode.input.WAKE``, restated so this module never imports evdev.
+WAKE = ()
+
 #: Pointer updates per second while desktop mode is active.
 TICK_HZ = 60.0
 TICK_INTERVAL = 1.0 / TICK_HZ
@@ -220,6 +224,9 @@ class State:
     osk_return: Mode = Mode.DESKTOP
     #: The navigation direction currently held, if any.
     osk_nav: OskNav | None = None
+    #: Whether the screen is locked, as the lock watcher last reported. Always
+    #: False when unlock is off: nothing is watching, so nothing is known.
+    locked: bool = False
 
     def reset_inputs(self) -> None:
         """Forget transient input state when entering or leaving a mode."""
@@ -950,7 +957,8 @@ class Daemon:
     """Wires the pure state machine to a real device and real subprocesses."""
 
     def __init__(
-        self, config: Config, reader, runner, virtual=None, windows=None, osk=None
+        self, config: Config, reader, runner, virtual=None, windows=None, osk=None,
+        lock=None,
     ) -> None:
         self._config = config
         self._reader = reader
@@ -963,6 +971,11 @@ class Daemon:
         #: same convention as ``virtual`` and ``windows``: absent means the one
         #: feature is off, never that anything fails.
         self._osk = osk
+        #: Lock-screen watcher (:mod:`padmode.lock`), or None when unlock is
+        #: off -- which it is unless asked for.
+        self._lock = lock
+        #: The descriptor the reader is watching for it, while it is.
+        self._lock_fd: int | None = None
         #: Whether the keyboard now on screen opened itself. Only an automatic
         #: opening closes automatically: one you asked for stays until you
         #: dismiss it, because having it vanish under you would be worse than
@@ -1032,6 +1045,7 @@ class Daemon:
             if overlay_name(binding) is None and not is_frontend(binding)
         })
         self._preflight_overlays()
+        self._start_lock()
         log.info(
             "ready -- hold %s and press a bound button (%d bindings)",
             self._config.modifier,
@@ -1041,10 +1055,14 @@ class Daemon:
             for item in self._reader.events():
                 if item is None:
                     self._tick()
+                elif item == WAKE:
+                    self._pump_lock()
                 else:
                     self._handle(*item)
         finally:
             self._reader.ungrab()
+            if self._lock is not None:
+                self._lock.stop()
             # Before the deferred return below, for the same reason _leave does
             # it: nothing of ours on screen while windows are being activated.
             self._stop_osk()
@@ -1058,6 +1076,26 @@ class Daemon:
             if self._virtual is not None:
                 self._virtual.close()
             log.info("stopped")
+
+    # -- the lock screen -----------------------------------------------
+    def _start_lock(self) -> None:
+        if self._lock is None or not self._lock.start():
+            return
+        self._lock_fd = self._lock.fileno()
+        if self._lock_fd is not None:
+            self._reader.watch(self._lock_fd)
+
+    def _pump_lock(self) -> None:
+        if self._lock is None:
+            return
+        for locked in self._lock.poll():
+            self._state.locked = locked
+            log.info("screen %s", "locked" if locked else "unlocked")
+        if self._lock_fd is not None and self._lock.fileno() is None:
+            # The monitor died. Unwatched at once: a closed pipe still selects
+            # as readable, and would wake the loop forever.
+            self._reader.unwatch(self._lock_fd)
+            self._lock_fd = None
 
     def _handle(self, ev_type: int, ev_code: int, ev_value: int) -> None:
         self._state.axis_ranges = self._reader.axis_ranges

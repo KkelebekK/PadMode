@@ -36,6 +36,7 @@ def _on_sigterm(_signum: int, _frame) -> None:
 
 def cmd_run(args: argparse.Namespace, config: Config) -> int:
     from .input import GamepadReader, VirtualInput
+    from .lock import LockWatcher
     from .osk.client import OskClient
     from .windows import detect
 
@@ -57,8 +58,11 @@ def cmd_run(args: argparse.Namespace, config: Config) -> int:
     # a pad-driven mode does, and a session without gtk4-layer-shell simply
     # never gets one -- the daemon does not care either way.
     osk = OskClient(config.osk) if config.osk.enabled else None
+    # Not even constructed unless asked for: unlock is opt-in, and an off
+    # feature should not leave a gdbus process behind it.
+    lock = LockWatcher() if config.unlock.enabled else None
     try:
-        Daemon(config, reader, runner, virtual, detection.backend, osk).run()
+        Daemon(config, reader, runner, virtual, detection.backend, osk, lock).run()
     except KeyboardInterrupt:
         pass
     return 0
@@ -339,6 +343,10 @@ def cmd_config(args: argparse.Namespace, config: Config) -> int:
     print("\n[osk.bindings]        # the d-pad navigates and cannot be rebound")
     for name, action in sorted(osk.bindings.items()):
         print(f'{name} = "{action}"')
+
+    print("\n[unlock]")
+    print(f"enabled = {str(config.unlock.enabled).lower()}"
+          "       # needs a digits-only password: a real downgrade")
     return 0
 
 

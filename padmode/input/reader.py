@@ -38,6 +38,12 @@ log = logging.getLogger(__name__)
 #: testable without it. Events are always 3-tuples, so there is no ambiguity.
 TICK = None
 
+#: Yielded when a watched file descriptor (:meth:`GamepadReader.watch`) has
+#: something to read. An empty tuple for the same reason ``TICK`` is ``None``:
+#: recognisable without importing this module, and never mistaken for an
+#: event, which is always three integers.
+WAKE = ()
+
 #: Devices we create ourselves (v0.2+) are named with this prefix so that we
 #: never grab our own virtual pad and feed our output back into our input.
 VIRTUAL_PREFIX = "padmode"
@@ -264,6 +270,12 @@ class GamepadReader:
         self._tick_interval: float | None = None
         self._axis_ranges: dict[int, tuple[int, int]] = {}
         self._trigger_axes: dict[int, int] = {}
+        #: Other descriptors the event loop waits on beside the pad's own.
+        self._watched: set[int] = set()
+        #: The selector of the loop now running, so a descriptor dropped
+        #: mid-loop stops being selected at once -- a closed pipe left
+        #: registered would read as forever readable.
+        self._selector: selectors.BaseSelector | None = None
 
     @property
     def axis_ranges(self) -> dict[int, tuple[int, int]]:
@@ -291,6 +303,30 @@ class GamepadReader:
         from ever settling, for a feature most users are not using right now.
         """
         self._tick_interval = interval
+
+    def watch(self, fd: int) -> None:
+        """Also wake on ``fd``: :meth:`events` yields ``WAKE`` when it is readable.
+
+        For things the daemon listens to besides the pad -- the lock-screen
+        monitor is the first. Nothing is read from ``fd`` here; the owner
+        drains it. While no pad is connected nothing is selected at all, so a
+        watched pipe simply fills up and is drained once one appears.
+        """
+        if fd in self._watched:
+            return
+        self._watched.add(fd)
+        if self._selector is not None:
+            self._selector.register(fd, selectors.EVENT_READ)
+
+    def unwatch(self, fd: int) -> None:
+        if fd not in self._watched:
+            return
+        self._watched.discard(fd)
+        if self._selector is not None:
+            try:
+                self._selector.unregister(fd)
+            except (KeyError, ValueError):
+                pass
 
     @property
     def grabbed(self) -> bool:
@@ -370,7 +406,11 @@ class GamepadReader:
         precisely when pointer motion is most needed.
         """
         selector = selectors.DefaultSelector()
-        selector.register(device.fileno(), selectors.EVENT_READ)
+        pad = device.fileno()
+        selector.register(pad, selectors.EVENT_READ)
+        for fd in self._watched:
+            selector.register(fd, selectors.EVENT_READ)
+        self._selector = selector
         deadline: float | None = None
         try:
             while not self._stop:
@@ -383,7 +423,8 @@ class GamepadReader:
                         deadline = now + interval
                     timeout = max(0.0, deadline - now)
 
-                if selector.select(timeout):
+                ready = {key.fd for key, _ in selector.select(timeout)}
+                if pad in ready:
                     try:
                         for event in device.read():
                             yield (event.type, event.code, event.value)
@@ -391,6 +432,8 @@ class GamepadReader:
                                 return
                     except BlockingIOError:
                         pass  # raced with another reader; nothing buffered
+                if ready - {pad}:
+                    yield WAKE
 
                 if deadline is not None and time.monotonic() >= deadline:
                     yield TICK
@@ -398,6 +441,7 @@ class GamepadReader:
                     # queues a burst of catch-up ticks.
                     deadline = max(time.monotonic(), deadline + interval)
         finally:
+            self._selector = None
             selector.close()
 
     def _open(self) -> InputDevice | None:

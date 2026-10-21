@@ -3,8 +3,9 @@
 Reference for `padmode/input/virtual.py` and the modes built on it.
 
 **Desktop mode (v0.2) is implemented.** The section below documents what
-shipped. The unlock module (v0.7) is still a specification, written down
-because it was learned by building a working version once.
+shipped. The unlock module (v0.7) has its first piece: the daemon knows when the
+screen is locked; typing at the lock screen is still a specification, written
+down because it was learned by building a working version once.
 
 We create our own uinput device with `python-evdev` rather than depending on
 input-remapper (CLAUDE.md §3.2). Doing so removes a heavy dependency *and*
@@ -151,19 +152,35 @@ must say so plainly rather than burying it.
 The design is: watch for the screen locking, and only while locked, let the pad
 type digits.
 
-**Lock-state signal.** Subscribe to the `ActiveChanged` D-Bus signal on
-`org.freedesktop.ScreenSaver`. Three things this has to get right:
+**Lock-state signal — built** (`padmode/lock.py`). The daemon listens for
+`ActiveChanged` on `org.freedesktop.ScreenSaver`. There is no D-Bus binding in
+the standard library and §2 rules out adding one, so it is reached the way
+every other desktop service is: an external command. `gdbus monitor` is one
+long-lived process, and its stdout is a pipe the event loop selects on beside
+the pad (`GamepadReader.watch`, which yields `WAKE`). Nothing polls.
 
-- **KDE emits the signal on two interfaces** (`org.freedesktop.ScreenSaver` and
-  `org.kde.screensaver`), so the same lock event arrives twice. De-duplicate by
-  acting only when the state actually *changes*, not on every signal.
-- **Query `GetActive` at startup.** Otherwise a daemon that starts while the
-  screen is already locked — which is exactly what happens on a boot that
-  autologins and then locks — never learns it is locked and the pad does
-  nothing.
-- The screensaver interface is the least portable piece in the project. Other
-  desktops expose different names, and some expose none. Degrade gracefully:
-  if the signal is unavailable, disable the module and log once.
+What the spec guessed, and what Plasma 6.7 actually does:
+
+- **The duplicate is two object paths, not two interfaces.** `ActiveChanged`
+  lives on `org.freedesktop.ScreenSaver` at both `/ScreenSaver` and
+  `/org/freedesktop/ScreenSaver`; `org.kde.screensaver` carries only
+  `AboutToLock`. We listen on `/ScreenSaver` alone, and still act only when
+  the state *changes*, so a desktop that does emit twice costs nothing.
+- **`GetActive` is asked when the name gains an owner**, not blindly at
+  startup. `gdbus monitor` reports the owner only after its subscription is
+  in place, so no lock can slip between the question and the first signal —
+  and a daemon that starts before the compositor does still learns the state
+  the moment it appears. The call takes ~3 ms.
+- **`--dest` filters on the sender.** Another client on the session bus cannot
+  fake a lock by emitting the signal itself — which matters, because "locked"
+  is what will turn the digit keyboard on.
+- **Unknown means unlocked.** No `gdbus`, no owner, an unanswered question, or
+  the monitor dying: each is said once in the log, and the state is the one in
+  which nothing extra is live. The watcher dying while locked reports an
+  unlock, so whatever was built for the lock screen gets torn down.
+
+The watcher is not even constructed unless `[unlock] enabled = true`, so an
+install that never opts in never has a `gdbus` process.
 
 **Only bind digits while locked.** The virtual keyboard must be created on lock
 and destroyed on unlock, never left live during normal use, so a stray press

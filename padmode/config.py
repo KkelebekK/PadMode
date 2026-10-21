@@ -295,6 +295,17 @@ class WindowsConfig:
 
 
 @dataclass(frozen=True)
+class UnlockConfig:
+    """Typing the login password at the lock screen with the pad (v0.7).
+
+    Off by default and staying that way: it only works with a digits-only
+    password, which is a real security downgrade (docs/virtual-input.md).
+    """
+
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
 class Config:
     """Fully resolved configuration. Immutable once built."""
 
@@ -317,6 +328,7 @@ class Config:
     desktop: DesktopConfig = field(default_factory=DesktopConfig)
     windows: WindowsConfig = field(default_factory=WindowsConfig)
     osk: OskConfig = field(default_factory=OskConfig)
+    unlock: UnlockConfig = field(default_factory=UnlockConfig)
     #: Overlay name -> definition. Empty by default: an overlay needs an app,
     #: and we do not know which apps anyone has.
     overlays: dict[str, Overlay] = field(default_factory=dict)
@@ -425,7 +437,19 @@ def parse(data: dict[str, Any]) -> Config:
         ),
     )
     cfg = replace(cfg, desktop=_parse_desktop(_table(data, "desktop"), cfg))
+    cfg = replace(cfg, unlock=_parse_unlock(_table(data, "unlock")))
     return cfg
+
+
+def _parse_unlock(table: dict[str, Any]) -> UnlockConfig:
+    """Parse ``[unlock]``. Absent means off, which is the default for a reason."""
+    _reject_unknown(table, {"enabled"}, "unlock")
+    unlock = UnlockConfig()
+    if "enabled" in table:
+        if not isinstance(table["enabled"], bool):
+            raise ConfigError("unlock.enabled must be true or false")
+        unlock = replace(unlock, enabled=table["enabled"])
+    return unlock
 
 
 def _parse_windows(table: dict[str, Any]) -> WindowsConfig:

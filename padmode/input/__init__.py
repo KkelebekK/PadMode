@@ -2,6 +2,7 @@
 
 from .reader import (
     TICK,
+    WAKE,
     GamepadReader,
     find_gamepad,
     is_virtual,
@@ -11,6 +12,7 @@ from .virtual import VirtualInput
 
 __all__ = [
     "TICK",
+    "WAKE",
     "GamepadReader",
     "VirtualInput",
     "find_gamepad",
