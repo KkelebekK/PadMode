@@ -630,8 +630,21 @@ account for buttons that are held at that instant.**
 
 The watcher reads roles and states, never content. It can see that a password
 field has focus — the lock screen proved that — and must never try to see more.
-That the lock screen is visible to it at all is a note for the unlock module
-(v0.7), which may turn out to be "the keyboard, at the lock screen".
+That the lock screen is visible to it at all suggested the unlock module
+(v0.7) might be "the keyboard, at the lock screen". It is not; see below.
+
+## At the lock screen
+
+*Tried* (Plasma 6.7 Wayland, 2026-10-21, pad in hand): it **types but is not
+drawn**. Desktop mode works at the KDE lock screen -- the pointer moves -- and
+pressing `Y` opens the keyboard as far as padmode can tell: the renderer
+measured and placed the panel, and round trips came back in 4-17 ms. But
+nothing appeared, while `A` still committed the invisible highlighted key into
+the password field. KWin hides ordinary clients' layer surfaces while locked.
+
+So the unlock module (v0.7) is **not** "the OSK, at the lock screen": a
+keyboard you cannot see is no keyboard. What the test did establish is the
+half the module needs -- uinput reaches the greeter, pointer and keys alike.
 
 ## Still unmeasured
 
@@ -639,8 +652,6 @@ Everything here is honest about not having happened yet:
 
 - **Any game other than the one tried** (risk 2), especially a gamescope
   session.
-- **Whether it appears over the KDE lock screen**, which would make the unlock
-  module (v0.7) "the OSK, at the lock screen" rather than its own thing.
 - **Any compositor other than KWin.**
 - **Auto-open beyond Qt apps.** Verified on Kate and Vicinae. GTK4 has
   AT-SPI built in and Firefox activates its own, but neither has been

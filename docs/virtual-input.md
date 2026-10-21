@@ -187,6 +187,11 @@ logged exactly one `screen locked` and one `screen unlocked`, 3.8 s apart —
 the duplicate on the second path never reached us. Not yet tried: a daemon
 started while already locked, and any desktop other than KDE.
 
+**Not the on-screen keyboard.** Tried at the KDE lock screen: it types there
+but is never drawn (`docs/on-screen-keyboard.md` §At the lock screen), so the
+module stays its own thing, as specified. The same test showed uinput input
+reaching the greeter, which is what this design rests on.
+
 **Only bind digits while locked.** The virtual keyboard must be created on lock
 and destroyed on unlock, never left live during normal use, so a stray press
 can never type into a focused application.
