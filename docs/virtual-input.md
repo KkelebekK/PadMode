@@ -182,6 +182,11 @@ What the spec guessed, and what Plasma 6.7 actually does:
 The watcher is not even constructed unless `[unlock] enabled = true`, so an
 install that never opts in never has a `gdbus` process.
 
+*Verified live* (Plasma 6.7 Wayland, 2026-10-21): Meta+L, then unlocking,
+logged exactly one `screen locked` and one `screen unlocked`, 3.8 s apart —
+the duplicate on the second path never reached us. Not yet tried: a daemon
+started while already locked, and any desktop other than KDE.
+
 **Only bind digits while locked.** The virtual keyboard must be created on lock
 and destroyed on unlock, never left live during normal use, so a stray press
 can never type into a focused application.
