@@ -195,3 +195,48 @@ reaching the greeter, which is what this design rests on.
 **Only bind digits while locked.** The virtual keyboard must be created on lock
 and destroyed on unlock, never left live during normal use, so a stray press
 can never type into a focused application.
+
+**Digit input — built** (`padmode/unlock.py`, `Mode.UNLOCK`). Decided with the
+maintainer on 2026-10-21, after the lock-screen test showed nothing we draw is
+visible there: the input is laid out to be learnt by feel, because the only
+feedback is the count of dots.
+
+| Input | Default |
+|---|---|
+| Left stick, 8 sectors of 45°, from the top clockwise | `1` `2` `3` `4` `5` `6` `7` `8` (↑ ↗ → ↘ ↓ ↙ ← ↖) |
+| X / Y | `9` / `0` |
+| START | Enter |
+| SELECT | delete one |
+| B | delete everything the pad typed |
+
+Every entry is a default in `[unlock.bindings]`: any button, d-pad direction
+or sector of either stick (`LS_UP_RIGHT`, `RS_DOWN` …) can take any digit or
+action, and `false` unbinds. The maintainer's reference point was the Switch,
+digits on the stick and the rest on face buttons.
+
+How it behaves, and why:
+
+- **A sector types on the way home, not on the way out.** Push, feel where
+  you are, correct, let go. The digit is the last sector the stick was in
+  above `stick_threshold` (0.6), typed when it falls to half of that.
+- **The stick is read per frame (`SYN_REPORT`), never per axis.** The two axes
+  of one movement are two events, and between them the stick is somewhere it
+  never was: coming home from ↗, X lands first and for one event it reads as
+  straight up. Per-axis reading typed 1 for 2; the tests caught it.
+- **The spring-back is ignored.** For `desktop.stick_settle` after a digit, a
+  push towards the three sectors facing it is taken for the rebound. The same
+  sector is never blocked, so `11` is as quick as `12`.
+- **Clear deletes what the pad typed**, counted, and no more: what someone
+  typed on a real keyboard is invisible to us.
+- **Entered and left only by the lock watcher** (`lock_changed`), never by a
+  button. Locking takes the pad from whatever had it — desktop mode is left
+  the way its exit button leaves it, the keyboard closed — grabs it so a game
+  behind the lock never sees the password dialled, and opens the keypad.
+  Unlocking closes the keypad and lands in IDLE, not back where it was.
+  Guide does nothing here: there is nothing behind a lock screen for it to
+  control.
+- **The keypad is its own uinput device** advertising `KEY_0`–`KEY_9`,
+  Enter and Backspace and nothing else — so not even a bug upstream can make
+  it type a shortcut. Top-row digits, not the keypad's: those depend on Num
+  Lock. Creating it costs ~100 ms, paid at the moment of locking.
+- If the keypad cannot be created, the pad is handed straight back.

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from . import buttons
+from . import unlock as unlock_module
 from .actions.builtin import ACTIONS
 from .osk import protocol as osk_protocol
 from .windows import backend_names
@@ -303,6 +304,15 @@ class UnlockConfig:
     """
 
     enabled: bool = False
+    #: How far a stick must be pushed before it aims at a digit, from 0.0 to
+    #: 1.0. The digit is typed when it comes back to half of this.
+    stick_threshold: float = 0.6
+    #: Pad input -> a digit, ``enter``, ``backspace`` or ``clear``. Inputs are
+    #: button and d-pad names, or a sector of either stick (``LS_UP``,
+    #: ``LS_UP_RIGHT`` ... ``RS_UP_LEFT``). See :mod:`padmode.unlock`.
+    bindings: dict[str, str] = field(
+        default_factory=lambda: dict(unlock_module.DEFAULT_BINDINGS)
+    )
 
 
 @dataclass(frozen=True)
@@ -437,19 +447,54 @@ def parse(data: dict[str, Any]) -> Config:
         ),
     )
     cfg = replace(cfg, desktop=_parse_desktop(_table(data, "desktop"), cfg))
-    cfg = replace(cfg, unlock=_parse_unlock(_table(data, "unlock")))
+    cfg = replace(cfg, unlock=_parse_unlock(_table(data, "unlock"), cfg.modifier))
     return cfg
 
 
-def _parse_unlock(table: dict[str, Any]) -> UnlockConfig:
+def _parse_unlock(table: dict[str, Any], modifier: str) -> UnlockConfig:
     """Parse ``[unlock]``. Absent means off, which is the default for a reason."""
-    _reject_unknown(table, {"enabled"}, "unlock")
+    _reject_unknown(table, {"enabled", "stick_threshold", "bindings"}, "unlock")
     unlock = UnlockConfig()
     if "enabled" in table:
         if not isinstance(table["enabled"], bool):
             raise ConfigError("unlock.enabled must be true or false")
         unlock = replace(unlock, enabled=table["enabled"])
-    return unlock
+
+    if "stick_threshold" in table:
+        value = table["stick_threshold"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError("unlock.stick_threshold must be a number")
+        if not 0.2 <= value <= 0.95:
+            raise ConfigError("unlock.stick_threshold must be between 0.2 and 0.95")
+        unlock = replace(unlock, stick_threshold=float(value))
+
+    merged = dict(unlock_module.DEFAULT_BINDINGS)
+    for raw_name, value in _table(table, "bindings").items():
+        name = unlock_module.canonical_sector(raw_name) or buttons.canonical(raw_name)
+        # A four-way stick direction (LS_UP, and aliases that spell it out)
+        # is the sector of the same name.
+        if name is None:
+            raise ConfigError(
+                f"unlock.bindings: unknown input {raw_name!r}. Use a button, a "
+                "d-pad direction, or a stick sector such as LS_UP_RIGHT"
+            )
+        if name == modifier:
+            raise ConfigError(
+                f"unlock.bindings.{name}: that is the modifier, which is never "
+                "rebound"
+            )
+        if value is False:
+            merged.pop(name, None)
+            continue
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 9:
+            value = str(value)
+        if not isinstance(value, str) or value not in unlock_module.ACTIONS:
+            raise ConfigError(
+                f"unlock.bindings.{name} must be a digit 0-9, \"enter\", "
+                "\"backspace\" or \"clear\", or false to unbind"
+            )
+        merged[name] = value
+    return replace(unlock, bindings=merged)
 
 
 def _parse_windows(table: dict[str, Any]) -> WindowsConfig:

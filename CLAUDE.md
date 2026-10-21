@@ -103,7 +103,8 @@ One process opens the gamepad and never lets go of ownership. Modes:
 - `guide_held` — momentarily grabbed; buttons are commands, not game input.
 - `desktop` — virtual mouse/keyboard active; pad drives the desktop.
 - `overlay` — like `desktop`, but we remember a window to return to.
-- `unlock` — virtual keyboard types digits at the lock screen (opt-in).
+- `unlock` — a digits-only keypad types the password at the lock screen
+  (opt-in). Entered and left by the lock watcher, never by a button.
 
 Mode transitions are the whole app. Keep them in one readable place.
 

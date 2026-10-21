@@ -29,6 +29,7 @@ from .config import (
     is_osk,
     overlay_name,
 )
+from . import unlock
 from .osk import protocol as osk_protocol
 
 log = logging.getLogger(__name__)
@@ -117,6 +118,11 @@ class Mode(enum.Enum):
     #: (:attr:`State.osk_return`); never entered from IDLE without passing
     #: through DESKTOP first, because the keyboard needs the virtual devices.
     OSK = "osk"
+    #: The screen is locked and the pad types the password (v0.7, opt-in).
+    #: Entered and left only by the lock watcher, never by a button: see
+    #: :func:`lock_changed`. Grabbed throughout, so a game still running
+    #: behind the lock screen does not see the password being dialled.
+    UNLOCK = "unlock"
 
 
 #: Modes in which we hold the pad exclusively and the tick runs.
@@ -227,6 +233,9 @@ class State:
     #: Whether the screen is locked, as the lock watcher last reported. Always
     #: False when unlock is off: nothing is watching, so nothing is known.
     locked: bool = False
+    #: The digit dial's memory while in :data:`Mode.UNLOCK`. Fresh on every
+    #: lock, so nothing half-typed survives from the last one.
+    unlock: unlock.UnlockState = field(default_factory=unlock.UnlockState)
 
     def reset_inputs(self) -> None:
         """Forget transient input state when entering or leaving a mode."""
@@ -258,6 +267,9 @@ class Decision:
     frontend: bool = False
     #: Zero or more things to do to the on-screen keyboard.
     osk: tuple[OskOp, ...] = ()
+    #: Key codes to tap on the unlock keypad, in order. Only ever set in
+    #: :data:`Mode.UNLOCK`.
+    keypad: tuple[int, ...] = ()
 
     def __bool__(self) -> bool:
         return bool(
@@ -268,6 +280,7 @@ class Decision:
             or self.overlay
             or self.frontend
             or self.osk
+            or self.keypad
         )
 
 
@@ -309,6 +322,16 @@ def decide(
             return NOTHING  # a trigger moving, but not across the threshold
         ev_type, ev_code, ev_value = translated
 
+    if state.mode is Mode.UNLOCK:
+        # The whole pad belongs to the dial, the modifier included: there is
+        # nothing behind a lock screen for Guide to control, and no way out of
+        # this mode but unlocking.
+        keys = unlock.step(
+            ev_type, ev_code, ev_value, state.unlock, config.unlock.bindings,
+            config.unlock.stick_threshold, config.desktop.stick_settle,
+            state.axis_ranges, now,
+        )
+        return Decision(keypad=keys) if keys else NOTHING
     if state.mode is Mode.OSK:
         return _decide_osk(ev_type, ev_code, ev_value, state, config, now)
     if state.mode in POINTER_MODES:
@@ -375,6 +398,31 @@ def decide(
         # daemon defers the activation past that release (gotcha §6.1).
         return Decision(frontend=True)
     return Decision(binding=binding)
+
+
+def lock_changed(locked: bool, state: State, config: Config) -> Decision:
+    """The lock screen came up or went away. Mutates only ``state``.
+
+    The one transition a button cannot make. Locking takes the pad from
+    whatever had it -- a game, desktop mode, the keyboard -- and hands it to the
+    dial; unlocking always lands in IDLE rather than back where it was, because
+    nobody returning to a desktop expects the pad to still be a mouse.
+    """
+    state.locked = locked
+    if not config.unlock.enabled:
+        return NOTHING
+    if locked:
+        if state.mode is Mode.UNLOCK:
+            return NOTHING
+        state.mode = Mode.UNLOCK
+        state.reset_inputs()
+        state.unlock = unlock.UnlockState()
+        return Decision(grab=Grab.ACQUIRE, mode=Mode.UNLOCK)
+    if state.mode is not Mode.UNLOCK:
+        return NOTHING
+    state.mode = Mode.IDLE
+    state.reset_inputs()
+    return Decision(grab=Grab.RELEASE, mode=Mode.IDLE)
 
 
 def _trigger_event(
@@ -958,7 +1006,7 @@ class Daemon:
 
     def __init__(
         self, config: Config, reader, runner, virtual=None, windows=None, osk=None,
-        lock=None,
+        lock=None, keypad=None,
     ) -> None:
         self._config = config
         self._reader = reader
@@ -976,6 +1024,9 @@ class Daemon:
         self._lock = lock
         #: The descriptor the reader is watching for it, while it is.
         self._lock_fd: int | None = None
+        #: The unlock keypad (:class:`~padmode.input.DigitKeypad`), open only
+        #: while the screen is locked.
+        self._keypad = keypad
         #: Whether the keyboard now on screen opened itself. Only an automatic
         #: opening closes automatically: one you asked for stays until you
         #: dismiss it, because having it vanish under you would be worse than
@@ -1063,6 +1114,8 @@ class Daemon:
             self._reader.ungrab()
             if self._lock is not None:
                 self._lock.stop()
+            if self._keypad is not None:
+                self._keypad.close()
             # Before the deferred return below, for the same reason _leave does
             # it: nothing of ours on screen while windows are being activated.
             self._stop_osk()
@@ -1089,13 +1142,38 @@ class Daemon:
         if self._lock is None:
             return
         for locked in self._lock.poll():
-            self._state.locked = locked
             log.info("screen %s", "locked" if locked else "unlocked")
+            was = self._state.mode
+            if was is Mode.OSK:
+                was = self._state.osk_return
+            decision = lock_changed(locked, self._state, self._config)
+            if decision.mode is Mode.UNLOCK:
+                self._enter_unlock(was)
+            elif decision.mode is Mode.IDLE:
+                self._leave_unlock()
         if self._lock_fd is not None and self._lock.fileno() is None:
             # The monitor died. Unwatched at once: a closed pipe still selects
             # as readable, and would wake the loop forever.
             self._reader.unwatch(self._lock_fd)
             self._lock_fd = None
+
+    def _enter_unlock(self, was: Mode) -> None:
+        # Out of a pad mode first, exactly as its own exit button would: the
+        # virtual devices released, the keyboard off screen.
+        if was in PAD_MODES:
+            self._leave(was)
+        if self._keypad is None or not self._keypad.open():
+            log.warning("unlock: no keypad, so the pad cannot type here")
+            self._state.mode = Mode.IDLE
+            self._reader.ungrab()
+            return
+        self._reader.grab()
+        log.info("unlock: the pad types the password -- see [unlock.bindings]")
+
+    def _leave_unlock(self) -> None:
+        if self._keypad is not None:
+            self._keypad.close()
+        self._reader.ungrab()
 
     def _handle(self, ev_type: int, ev_code: int, ev_value: int) -> None:
         self._state.axis_ranges = self._reader.axis_ranges
@@ -1145,6 +1223,9 @@ class Daemon:
             self._apply(op)
         for osk_op in decision.osk:
             self._apply_osk(osk_op)
+        if self._keypad is not None:
+            for code in decision.keypad:
+                self._keypad.tap(code)
 
     def _tick(self) -> None:
         now = time.monotonic()

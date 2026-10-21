@@ -35,8 +35,9 @@ def _on_sigterm(_signum: int, _frame) -> None:
 
 
 def cmd_run(args: argparse.Namespace, config: Config) -> int:
-    from .input import GamepadReader, VirtualInput
+    from .input import DigitKeypad, GamepadReader, VirtualInput
     from .lock import LockWatcher
+    from .unlock import KEYPAD_KEYS
     from .osk.client import OskClient
     from .windows import detect
 
@@ -61,8 +62,11 @@ def cmd_run(args: argparse.Namespace, config: Config) -> int:
     # Not even constructed unless asked for: unlock is opt-in, and an off
     # feature should not leave a gdbus process behind it.
     lock = LockWatcher() if config.unlock.enabled else None
+    keypad = DigitKeypad(KEYPAD_KEYS) if config.unlock.enabled else None
     try:
-        Daemon(config, reader, runner, virtual, detection.backend, osk, lock).run()
+        Daemon(
+            config, reader, runner, virtual, detection.backend, osk, lock, keypad
+        ).run()
     except KeyboardInterrupt:
         pass
     return 0
@@ -347,6 +351,10 @@ def cmd_config(args: argparse.Namespace, config: Config) -> int:
     print("\n[unlock]")
     print(f"enabled = {str(config.unlock.enabled).lower()}"
           "       # needs a digits-only password: a real downgrade")
+    print(f"stick_threshold = {config.unlock.stick_threshold:g}")
+    print("\n[unlock.bindings]     # a stick sector types on the way home")
+    for name, action in sorted(config.unlock.bindings.items()):
+        print(f'{name} = "{action}"')
     return 0
 
 

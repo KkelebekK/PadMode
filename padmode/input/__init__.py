@@ -8,9 +8,10 @@ from .reader import (
     is_virtual,
     looks_like_gamepad,
 )
-from .virtual import VirtualInput
+from .virtual import DigitKeypad, VirtualInput
 
 __all__ = [
+    "DigitKeypad",
     "TICK",
     "WAKE",
     "GamepadReader",

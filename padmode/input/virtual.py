@@ -254,6 +254,68 @@ class VirtualInput:
             pass
 
 
+KEYPAD_NAME = "padmode unlock keypad"
+
+
+class DigitKeypad:
+    """A keyboard that can type digits, Enter and Backspace, and nothing else.
+
+    The unlock module's only output. Unlike :class:`VirtualInput` it is created
+    on lock and destroyed on unlock (``docs/virtual-input.md``): no digit can
+    reach a focused application during normal use, because during normal use
+    there is no device to type it with. Its advertised keys are
+    :data:`padmode.unlock.KEYPAD_KEYS`, so even a bug upstream cannot make it
+    type a shortcut.
+
+    Creating a uinput device loses the first events while the compositor
+    notices it -- which is why :class:`VirtualInput` keeps its devices. Here
+    that cost lands at the moment of locking, seconds before anyone types.
+    """
+
+    def __init__(self, keys: tuple[int, ...]) -> None:
+        self._keys = keys
+        self._device: UInput | None = None
+
+    @property
+    def active(self) -> bool:
+        return self._device is not None
+
+    def open(self) -> bool:
+        if self._device is not None:
+            return True
+        try:
+            self._device = UInput(
+                {ecodes.EV_KEY: list(self._keys)}, name=KEYPAD_NAME, version=1
+            )
+        except (OSError, ValueError) as exc:
+            log.error(
+                "cannot create the unlock keypad (%s). It needs write access "
+                "to /dev/uinput, like desktop mode.", exc,
+            )
+            self._device = None
+            return False
+        return True
+
+    def tap(self, code: int) -> None:
+        if self._device is None or code not in self._keys:
+            return
+        try:
+            self._device.write(ecodes.EV_KEY, code, 1)
+            self._device.syn()
+            self._device.write(ecodes.EV_KEY, code, 0)
+            self._device.syn()
+        except (OSError, ValueError) as exc:
+            log.warning("unlock keypad write failed: %s", exc)
+
+    def close(self) -> None:
+        device, self._device = self._device, None
+        if device is not None:
+            try:
+                device.close()
+            except (OSError, ValueError):
+                pass
+
+
 def _split(value: float) -> tuple[int, float]:
     """Split into a whole part to emit and a remainder to carry forward."""
     whole = int(value)
