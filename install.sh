@@ -90,6 +90,11 @@ EOF
     # Which of these is the right one depends on the session, and padmode
     # already knows the rules -- so check only that *some* window tool exists
     # and point at 'padmode windows' for the specifics.
+    # Only unlock needs it, and unlock is off unless asked for -- but finding
+    # out at the lock screen would be the worst moment to.
+    command -v gdbus >/dev/null || warn \
+        "optional: 'gdbus' not found -- unlock with the pad will be disabled"
+
     if ! command -v kdotool >/dev/null && ! command -v xdotool >/dev/null; then
         warn "optional: no window tool found (kdotool on KDE Wayland, xdotool"
         warn "  on X11) -- app overlays will be disabled. Nothing else changes."

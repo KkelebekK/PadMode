@@ -12,12 +12,13 @@ drive the whole desktop from the couch without reaching for either. Or bind a
 button to an app and have it come up *over* your game, with one press to send
 you straight back — and another button to go home to your game frontend.
 
-> **Status: v0.5.** Media and volume control, a full desktop mode, app overlays
+> **Status: v0.7.** Media and volume control, a full desktop mode, app overlays
 > that return you to the game, a bindable frontend to land on when the game is
-> gone, a metadata generator for Heroic libraries, and a console-style
-> on-screen keyboard you drive with the pad. Everything except overlays and the
-> keyboard still works on every Linux desktop with no compositor involvement at
-> all.
+> gone, metadata generators for Heroic and Steam libraries, a console-style
+> on-screen keyboard you drive with the pad, and — opt-in, off by default —
+> unlocking the screen with the pad. Everything except overlays, the keyboard
+> and unlock still works on every Linux desktop with no compositor involvement
+> at all.
 
 `padmode` is a provisional name and may change before 1.0.
 
@@ -41,10 +42,10 @@ not expose to ordinary clients:
 | Desktop | Media + desktop mode | Overlays | On-screen keyboard |
 |---|---|---|---|
 | KDE Plasma (Wayland) | Yes | Yes — needs `kdotool` | Yes — needs `gtk4-layer-shell` |
-| Any X11 desktop | Yes | Yes — needs `xdotool` | **No** — not in v0.5 |
+| Any X11 desktop | Yes | Yes — needs `xdotool` | **No** — not yet |
 | Hyprland / sway | Yes | Community backend | Should work, untested |
 | GNOME (Wayland) | Yes | **No** — see below | **No** — see below |
-| GNOME (X11) | Yes | Yes | **No** — not in v0.5 |
+| GNOME (X11) | Yes | Yes | **No** — not yet |
 
 The keyboard is narrower than overlays, and for a different reason. It draws
 itself with `zwlr_layer_shell_v1`, the Wayland protocol for surfaces that sit
@@ -75,6 +76,9 @@ startup and disables only the overlay buttons.
   (`gtk4-layer-shell python-gobject` on Arch). Wayland sessions only
 - Optional, for the keyboard opening itself: `at-spi2-core`, plus desktop
   accessibility switched on (see below)
+- Optional, for unlock only: `gdbus` (part of GLib, so almost certainly already
+  there) and a desktop that provides `org.freedesktop.ScreenSaver` on the
+  session bus. Tested on KDE Plasma only
 
 Missing optional tools disable only the bindings that need them. No
 `playerctl`? Volume control still works, and padmode says so once at startup
@@ -234,6 +238,66 @@ needs.
 > On a non-US layout the letters are fine but the punctuation will not match
 > what the keyboard draws. Fixing that properly means reading your active
 > layout, which padmode does not do yet.
+
+### Unlocking with the pad
+
+> **⚠️ This needs a login password made of digits only, and that is a real
+> security downgrade.** On most systems the login password is also your `sudo`
+> password, and often what unlocks your keyring, and a password of digits is
+> far easier to guess than one of words — by anyone who sits down at the
+> machine, with a pad or without. If you turn this on, use a long one: eight
+> digits or more, not a four-digit PIN. padmode cannot make a numeric password
+> strong; it can only make it convenient.
+
+It is **off by default** and stays off unless you write:
+
+```toml
+[unlock]
+enabled = true
+```
+
+While the screen is locked, the pad types digits into the password field. The
+lock screen shows nothing padmode draws, so there is nothing on screen to
+read: the layout is meant to be learnt by feel, and the dots in the field are
+your only feedback.
+
+| Input | Types |
+|---|---|
+| Left stick ↑ ↗ → ↘ ↓ ↙ ← ↖ | 1 2 3 4 5 6 7 8 |
+| X / Y | 9 / 0 |
+| Start | Enter — try the password |
+| Select | Delete one |
+| B | Delete everything the pad typed |
+
+A stick direction types **when you let go**, not when you push: push, feel
+where you are, correct if you need to, release. The stick springing back past
+centre does not type the opposite digit.
+
+What protects you while it is on:
+
+- **It only exists while the screen is locked.** The keypad padmode types with
+  is a separate virtual device, created when the lock screen comes up and
+  destroyed when it goes away. During normal use there is no device that could
+  type a digit into whatever has focus.
+- **That keypad can type 0–9, Enter and Backspace, and nothing else** — not a
+  letter, not a shortcut, whatever goes wrong upstream.
+- **Only the real lock screen counts.** padmode listens to the screensaver
+  service itself; another program on your session bus cannot fake a lock.
+- **While locked, the pad is padmode's.** A game still running behind the lock
+  screen does not see your password being dialled. Guide does nothing there.
+- **When in doubt, it is off.** No screensaver service, or the watcher dying,
+  means unlock is disabled and the log says so once.
+
+Every input is rebindable, including the eight directions of either stick:
+
+```toml
+[unlock.bindings]
+LS_UP = "0"          # any digit, or "enter", "backspace", "clear"
+DPAD_UP = "1"        # buttons and the d-pad work too
+RS_DOWN_LEFT = "5"   # sectors: LS_/RS_ + UP, UP_RIGHT, RIGHT, DOWN_RIGHT,
+                     # DOWN, DOWN_LEFT, LEFT, UP_LEFT
+B = false            # unbind
+```
 
 ### Overlays
 
@@ -448,6 +512,15 @@ Y = "space"            # Whatever you bind, the badge on the key follows.
 LT = "shift"
 RT = "layer"
 L3 = "capslock"
+
+[unlock]
+enabled = false        # read "Unlocking with the pad" before turning this on
+stick_threshold = 0.6  # how far a stick goes to aim at a digit; it types when
+                       # it comes back to half of this
+
+[unlock.bindings]      # see "Unlocking with the pad"
+LS_UP = "1"
+X = "9"
 ```
 
 Button names accept the obvious spellings: `RB` or `R1`, `GUIDE` or `MODE` or
@@ -510,6 +583,11 @@ and quietly ignoring half your bindings.
 - **Overlays need a window backend.** No `kdotool`/`xdotool`, or GNOME on
   Wayland, means the overlay buttons do nothing and say so once at startup.
   Nothing else is affected.
+- **Unlock is tested on KDE Plasma only.** Other desktops name their
+  screensaver service differently or not at all; where padmode finds none, it
+  says so and unlock stays off. Also untried: starting padmode while the screen
+  is already locked, and the pad reconnecting at the lock screen — that loses
+  the exclusive hold, so a game behind the lock would see the digits again.
 - **`park_pointer` is unproven.** No compositor here can place the cursor, so
   padmode drives its own pointer and corrects until it arrives. It is off by
   default and gives up rather than fighting; if it lands short, that is why.
@@ -523,8 +601,8 @@ and quietly ignoring half your bindings.
 | ✅ v0.3 | Window backends, in-game overlays, return-to-game | KDE + X11 |
 | ✅ **v0.4** | Frontend button and fallback, Heroic metadata generator | KDE + X11 |
 | ✅ **v0.5** | On-screen keyboard you drive with the pad, like a console | KDE Wayland only |
-| v0.6 | Steam metadata generator *(built, not yet released)* | No |
-| v0.7 | Gamepad unlock (opt-in, off by default) | Screensaver D-Bus |
+| ✅ v0.6 | Steam metadata generator | No |
+| ✅ **v0.7** | Unlocking the screen with the pad (opt-in, off by default) | Screensaver D-Bus |
 | v0.8 | Settings GUI — change the config from a window, with the pad | No |
 
 v0.1 and v0.2 are deliberately useful on their own, on any desktop. Overlays

@@ -9,10 +9,11 @@ screen with the pad.
 `WeHaveSteamMachineAtHome` (a joke); do not use "Steam Machine" or other Valve
 product names in the shipped tool, package, or docs.
 
-**Status: v0.5.0** (Guide-hold media/volume/mic; uinput virtual
+**Status: v0.7.0** (Guide-hold media/volume/mic; uinput virtual
 mouse/keyboard; desktop mode with bindable stick directions; window backends
-and overlay mode with return-to-game; frontend integration and the Heroic
-metadata generator; on-screen keyboard with auto-open; 545 tests). This document is the
+and overlay mode with return-to-game; frontend integration and the Heroic and
+Steam metadata generators; on-screen keyboard with auto-open; opt-in unlock
+with the pad; 669 tests). This document is the
 contract. If something here is wrong, fix this file in the same change as the
 code.
 
@@ -203,8 +204,8 @@ Core stays frontend-agnostic: nothing here knows what Pegasus is.
 | ~~**v0.3**~~ ✅ | Window backends, overlay mode, return-to-game | KDE + X11 |
 | ~~**v0.4**~~ ✅ | Frontend integration (return target), Heroic metadata generator | KDE + X11 |
 | ~~**v0.5**~~ ✅ | On-screen keyboard, console style (`docs/on-screen-keyboard.md`) | **KDE Wayland only** — layer-shell, not window activation. X11 was dropped from this version: it needs override-redirect, which is different code, not a flag. The keyboard is therefore *narrower* than overlays, and the README says so |
-| **v0.6** | Steam metadata generator (built; not released) | None |
-| **v0.7** | Unlock module (opt-in, off by default) | Screensaver D-Bus |
+| ~~**v0.6**~~ ✅ | Steam metadata generator (`docs/metadata-generators.md`) | None |
+| ~~**v0.7**~~ ✅ | Unlock module, opt-in, off by default (`padmode/lock.py`, `padmode/unlock.py`, `docs/virtual-input.md`) | Screensaver D-Bus — **verified on KDE only**. The OSK is *not* the unlock UI: KWin hides it at the lock screen |
 | **v0.8** | Settings GUI: edit the config from a window, drivable with the pad | None — an ordinary window |
 
 Do not pull work earlier in this list. The point of the ordering is that v0.1

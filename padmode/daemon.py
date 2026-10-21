@@ -7,8 +7,12 @@ the world lives in :class:`Daemon` below them.
 
 Four modes as of v0.3. The on-screen keyboard (v0.5) deliberately did not make
 a fifth: it is a *layer* over a pad-driven mode, because the pointer has to
-keep working while you type. When a fifth mode does arrive and this file stops
-being easy to read in one sitting, split it into ``modes/`` -- but not before.
+keep working while you type. Unlock (v0.7) is the first mode that is its own
+thing, and it was split out the way the rest should be when the time comes:
+the transition into and out of it stays here (:func:`lock_changed`), what the
+pad does inside it lives in :mod:`padmode.unlock`. Split the other modes into
+``modes/`` the same way once this file stops being easy to read in one
+sitting -- but not before.
 """
 
 from __future__ import annotations
