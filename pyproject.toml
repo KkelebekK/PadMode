@@ -29,8 +29,8 @@ dependencies = ["evdev>=1.6"]
 padmode = "padmode.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/kelebek/padmode"
-Issues = "https://github.com/kelebek/padmode/issues"
+Homepage = "https://github.com/KkelebekK/PadMode"
+Issues = "https://github.com/KkelebekK/PadMode/issues"
 
 [tool.setuptools.packages.find]
 include = ["padmode*"]

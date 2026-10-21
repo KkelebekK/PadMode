@@ -1,6 +1,6 @@
 [Unit]
 Description=Regenerate frontend metadata from the Heroic library
-Documentation=https://github.com/kelebek/padmode
+Documentation=https://github.com/KkelebekK/PadMode
 
 [Service]
 Type=oneshot

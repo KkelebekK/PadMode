@@ -1,6 +1,6 @@
 [Unit]
 Description=padmode -- gamepad console mode
-Documentation=https://github.com/kelebek/padmode
+Documentation=https://github.com/KkelebekK/PadMode
 # Ordering only, not a requirement: padmode tolerates starting before the
 # session is fully up, and it retries until a gamepad appears.
 After=graphical-session.target

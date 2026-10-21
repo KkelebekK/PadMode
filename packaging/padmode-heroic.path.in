@@ -1,6 +1,6 @@
 [Unit]
 Description=Watch the Heroic library for installs and removals
-Documentation=https://github.com/kelebek/padmode
+Documentation=https://github.com/KkelebekK/PadMode
 
 [Path]
 # One file per store: Epic, GOG, Amazon. @HEROIC_CACHE@ is substituted by

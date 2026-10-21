@@ -87,8 +87,8 @@ instead of failing silently.
 ## Install
 
 ```bash
-git clone https://github.com/kelebek/padmode
-cd padmode
+git clone https://github.com/KkelebekK/PadMode
+cd PadMode
 ./install.sh
 ```
 
