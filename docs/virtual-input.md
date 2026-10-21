@@ -240,3 +240,10 @@ How it behaves, and why:
   it type a shortcut. Top-row digits, not the keypad's: those depend on Num
   Lock. Creating it costs ~100 ms, paid at the moment of locking.
 - If the keypad cannot be created, the pad is handed straight back.
+
+*Verified live* (Plasma 6.7 Wayland, 2026-10-21, the maintainer with the pad):
+every default typed what it should — three stick sectors, X and Y, one delete,
+clear — Guide did nothing, and on a second lock the pad alone unlocked the
+machine. Not yet tried: a daemon started while already locked, the pad
+reconnecting mid-lock (the grab is lost on reconnect; digits still type), any
+desktop other than KDE.
