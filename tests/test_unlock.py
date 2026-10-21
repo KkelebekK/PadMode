@@ -247,6 +247,36 @@ class LockChangedTest(unittest.TestCase):
         )
 
 
+class XboxLayoutTest(unittest.TestCase):
+    """The README's Xbox-style layout parses, and types what it promises."""
+
+    def test_the_readme_block(self):
+        import pathlib
+        import re
+        import tomllib
+
+        readme = pathlib.Path(__file__).resolve().parent.parent / "README.md"
+        blocks = re.findall(r"```toml\n(.*?)```", readme.read_text(), re.S)
+        block = next(b for b in blocks if 'DPAD_LEFT = "2"' in b)
+        data = tomllib.loads(block)
+        data["unlock"]["enabled"] = True
+        cfg = parse(data)
+        state = State(trigger_axes={buttons.ABS_Z: buttons.code_of("LT"),
+                                    buttons.ABS_RZ: buttons.code_of("RT")})
+        lock_changed(True, state, cfg)
+        hy, hx = buttons.ABS_HAT0Y, buttons.ABS_HAT0X
+        events = [(ABS, hy, -1), (ABS, hy, 0), (ABS, hx, -1), (ABS, hx, 0),
+                  (ABS, hy, 1), (ABS, hy, 0), (ABS, hx, 1), (ABS, hx, 0),
+                  (ABS, buttons.ABS_Z, 255), (ABS, buttons.ABS_Z, 0),
+                  (ABS, buttons.ABS_RZ, 255), (ABS, buttons.ABS_RZ, 0)]
+        for name in ("LB", "RB", "Y", "X"):
+            events += press(name)
+        events += push(0, -1)  # the dial is off in this layout
+        typed = [code for ev in events
+                 for code in decide(*ev, state, cfg, 0.0).keypad]
+        self.assertEqual(typed, [DIGIT[d] for d in "1234567890"])
+
+
 # --- the daemon, against fakes ---------------------------------------------
 class FakeWatcher:
     """Lock states handed out one WAKE at a time."""

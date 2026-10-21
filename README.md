@@ -299,6 +299,35 @@ RS_DOWN_LEFT = "5"   # sectors: LS_/RS_ + UP, UP_RIGHT, RIGHT, DOWN_RIGHT,
 B = false            # unbind
 ```
 
+**Prefer the Xbox lock screen's layout?** It puts the digits on buttons rather
+than on a stick — 1–4 on the d-pad, then the triggers, the bumpers, Y and X.
+This gives you exactly that, with the stick dial switched off so there is only
+one way to type each digit:
+
+```toml
+[unlock.bindings]
+DPAD_UP = "1"
+DPAD_LEFT = "2"
+DPAD_DOWN = "3"
+DPAD_RIGHT = "4"
+LT = "5"
+RT = "6"
+LB = "7"
+RB = "8"
+Y = "9"
+X = "0"
+LS_UP = false
+LS_UP_RIGHT = false
+LS_RIGHT = false
+LS_DOWN_RIGHT = false
+LS_DOWN = false
+LS_DOWN_LEFT = false
+LS_LEFT = false
+LS_UP_LEFT = false
+```
+
+Start, Select and B keep their meaning in both layouts.
+
 ### Overlays
 
 An overlay is an app on a button. Press it and the app comes up over whatever
