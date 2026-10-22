@@ -964,18 +964,34 @@ def _usable(row: Gtk.Widget) -> bool:
     return row.get_mapped() and row.is_sensitive() and row.get_focusable()
 
 
-def _dialog_stops(widget: Gtk.Widget) -> list[Gtk.Widget]:
-    """A dialog's text rows, drop-downs and buttons, in the order shown."""
-    out = []
-    child = widget.get_first_child()
-    while child is not None:
-        if isinstance(child, (Adw.EntryRow, Gtk.DropDown, Gtk.Button)):
-            if child.get_mapped() and child.is_sensitive():
-                out.append(child)
-        else:
-            out.extend(_dialog_stops(child))
-        child = child.get_next_sibling()
-    return out
+def _dialog_stops(dialog: Gtk.Widget) -> list[Gtk.Widget]:
+    """A dialog's text rows, drop-downs and buttons, top to bottom as *drawn*.
+
+    Not in widget order: a narrow alert dialog stacks its buttons in the
+    reverse of the order they were added, so walking the tree made "down" go
+    up -- reported on the first real run.
+    """
+    found: list[Gtk.Widget] = []
+
+    def walk(widget: Gtk.Widget) -> None:
+        child = widget.get_first_child()
+        while child is not None:
+            if isinstance(child, (Adw.EntryRow, Gtk.DropDown, Gtk.Button)):
+                if child.get_mapped() and child.is_sensitive():
+                    found.append(child)
+            else:
+                walk(child)
+            child = child.get_next_sibling()
+
+    walk(dialog)
+
+    def where(widget: Gtk.Widget) -> tuple[float, float]:
+        ok, bounds = widget.compute_bounds(dialog)
+        if not ok:
+            return (0.0, 0.0)
+        return (round(bounds.get_y()), bounds.get_x())
+
+    return sorted(found, key=where)
 
 
 def _focusables(row: Gtk.Widget) -> list[Gtk.Widget]:
