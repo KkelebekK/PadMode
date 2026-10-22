@@ -70,3 +70,13 @@ class Service:
         if result.returncode != 0:
             return (result.stderr or result.stdout).strip() or "systemctl failed"
         return None
+
+    def stop(self) -> str | None:
+        """Stop it now. Start at login is left as it was."""
+        try:
+            result = self._systemctl("stop")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return str(exc)
+        if result.returncode != 0:
+            return (result.stderr or result.stdout).strip() or "systemctl failed"
+        return None

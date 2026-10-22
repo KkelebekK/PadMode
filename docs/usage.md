@@ -349,7 +349,8 @@ use the desktop shortcut, if you let `install.sh` make one; or run
 `padmode settings`. Five pages:
 
 - **General** — whether padmode starts when you log in, whether it is
-  running, and a button to start or restart it.
+  running, and buttons to start, restart or stop it. Stopping asks first:
+  it takes the pad away from the window too.
 - **Buttons** — what each Guide combo does, desktop mode's buttons, and the
   unlock layout (stick dial or Xbox, one choice).
 - **Feel** — pointer and scroll speed, dead zone, curve, how far sticks and

@@ -31,7 +31,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from .. import config  # noqa: E402
 from ..actions.builtin import ACTIONS  # noqa: E402
@@ -46,7 +46,16 @@ APP_ID = "io.github.KkelebekK.PadMode.Settings"
 #: How far one wheel click of the right stick scrolls a page, in pixels.
 SCROLL_STEP = 48
 
+#: How long the tab highlight takes to slide to a new tab, in milliseconds.
+TAB_SLIDE_MS = 260
+
 CSS = b"""
+.padmode-tabs .tab { background: none; box-shadow: none; min-width: 92px; }
+.padmode-tabs .tab:hover { background-color: alpha(currentColor, 0.05); }
+.padmode-tabs .tab-pill {
+  background-color: alpha(currentColor, 0.1);
+  border-radius: 9px;
+}
 .padmode-settings row { min-height: 52px; }
 .padmode-settings .binding-button { font-weight: bold; }
 .padmode-settings .capturing { background-color: alpha(@accent_bg_color, 0.25); }
@@ -99,9 +108,8 @@ class Window(Adw.ApplicationWindow):
         self.apply_button.connect("clicked", lambda _b: self.apply())
         header.pack_end(self.apply_button)
         self.stack = Adw.ViewStack()
-        switcher = Adw.ViewSwitcher(stack=self.stack,
-                                    policy=Adw.ViewSwitcherPolicy.WIDE)
-        header.set_title_widget(switcher)
+        self.tabs = TabBar(self.stack)
+        header.set_title_widget(self.tabs)
         view.add_top_bar(header)
 
         self.banner = Adw.Banner()
@@ -125,6 +133,7 @@ class Window(Adw.ApplicationWindow):
         for name, build in self.pages:
             title, icon = self._titles[name]
             self.stack.add_titled_with_icon(build(), name, title, icon)
+            self.tabs.add(name, title, icon)
 
         self.connect("close-request", self._on_close_request)
         # Start on the first row, once there is something mapped to focus: a
@@ -678,10 +687,38 @@ class Window(Adw.ApplicationWindow):
 
         button.connect("clicked", start)
         status.add_suffix(button)
-        status.set_activatable_widget(button)
+        if running:
+            stop = Gtk.Button(label="Stop", valign=Gtk.Align.CENTER)
+            stop.add_css_class("destructive-action")
+            stop.connect("clicked", lambda _b: self._confirm_stop())
+            status.add_suffix(stop)
         group.add(status)
         page.add(group)
         return page
+
+    def _confirm_stop(self) -> None:
+        """Stopping padmode takes the pad away from this window too, so it
+        asks first -- and the way back is the mouse, which the dialog says."""
+        dialog = Adw.AlertDialog(
+            heading="Stop padmode?",
+            body="The pad stops doing anything -- here too -- until padmode "
+                 "starts again. Start it from this page with the mouse, or "
+                 "log in again if it starts at login.")
+        dialog.add_response("cancel", "Keep it running")
+        dialog.add_response("stop", "Stop")
+        dialog.set_response_appearance("stop", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_close_response("cancel")
+
+        def chosen(_d, response):
+            if response != "stop":
+                return
+            error = self.session.service.stop()
+            self.toast(f"Could not stop padmode: {error}" if error
+                       else "padmode stopped", 4)
+            GLib.timeout_add(800, lambda: (self.changed("general"), False)[1])
+
+        dialog.connect("response", chosen)
+        self._present(dialog)
 
     def _buttons_page(self) -> Adw.PreferencesPage:
         page = Adw.PreferencesPage()
@@ -972,6 +1009,83 @@ class Window(Adw.ApplicationWindow):
         return page
 
 
+class TabBar(Gtk.Fixed):
+    """The page tabs, with a highlight that slides from tab to tab.
+
+    libadwaita's own switcher jumps; this one glides, the way a console's
+    settings menu does -- asked for by the maintainer. The highlight is a
+    pill drawn *under* the row of buttons (a :class:`Gtk.Fixed` paints its
+    children in the order they were added), and an animation moves and
+    resizes it between the old tab's bounds and the new one's. Pad, mouse
+    and keyboard all change the stack's visible page, so all three slide.
+    """
+
+    def __init__(self, stack: Adw.ViewStack) -> None:
+        super().__init__()
+        self.add_css_class("padmode-tabs")
+        self._stack = stack
+        self._pill = Gtk.Box(css_classes=["tab-pill"])
+        self._row = Gtk.Box(spacing=4)
+        self.put(self._pill, 0, 0)
+        self.put(self._row, 0, 0)
+        self._buttons: dict[str, Gtk.Button] = {}
+        self._at = (0.0, 0.0, 0.0, 0.0)          # x, y, width, height now
+        self._animation: Adw.TimedAnimation | None = None
+        stack.connect("notify::visible-child-name", lambda *_: self.slide())
+        # Sizes exist only after the first layout; place it there, unanimated.
+        self.connect("map", lambda *_: GLib.timeout_add(30, self._snap))
+
+    def add(self, name: str, title: str, icon: str) -> None:
+        button = Gtk.Button(css_classes=["flat", "tab"],
+                            child=Adw.ButtonContent(label=title, icon_name=icon))
+        button.connect("clicked",
+                       lambda _b: self._stack.set_visible_child_name(name))
+        self._row.append(button)
+        self._buttons[name] = button
+
+    def _bounds(self) -> tuple[float, float, float, float] | None:
+        button = self._buttons.get(self._stack.get_visible_child_name() or "")
+        if button is None:
+            return None
+        ok, rect = button.compute_bounds(self)
+        if not ok or rect.get_width() <= 0:
+            return None
+        return (rect.get_x(), rect.get_y(), rect.get_width(), rect.get_height())
+
+    def _put_pill(self, x: float, y: float, w: float, h: float) -> None:
+        self.move(self._pill, x, y)
+        self._pill.set_size_request(round(w), round(h))
+        self._at = (x, y, w, h)
+
+    def _snap(self) -> bool:
+        bounds = self._bounds()
+        if bounds is None:
+            return True   # not laid out yet; try again next tick
+        self._put_pill(*bounds)
+        return False
+
+    def slide(self) -> None:
+        target = self._bounds()
+        if target is None:
+            return
+        start = self._at
+        if start[2] <= 0:          # never placed: nothing to slide from
+            self._put_pill(*target)
+            return
+        if self._animation is not None:
+            self._animation.skip()
+
+        def step(t: float) -> None:
+            self._put_pill(*(a + (b - a) * t for a, b in zip(start, target)))
+
+        animation = Adw.TimedAnimation(
+            widget=self, value_from=0.0, value_to=1.0, duration=TAB_SLIDE_MS,
+            target=Adw.CallbackAnimationTarget.new(step),
+            easing=Adw.Easing.EASE_OUT_CUBIC)
+        self._animation = animation
+        animation.play()
+
+
 # -- helpers ----------------------------------------------------------------
 def _regenerate(window: "Window") -> None:
     if window.session.dirty:
@@ -1113,7 +1227,11 @@ def _restart_daemon() -> None:
 # -- entry point ------------------------------------------------------------
 class App(Adw.Application):
     def __init__(self, args: argparse.Namespace) -> None:
-        super().__init__(application_id=APP_ID)
+        # A screenshot run must never hand itself to the window the user has
+        # open -- single-instance would forward it there and raise theirs.
+        flags = (Gio.ApplicationFlags.NON_UNIQUE if args.screenshot
+                 else Gio.ApplicationFlags.DEFAULT_FLAGS)
+        super().__init__(application_id=APP_ID, flags=flags)
         self.args = args
         self.window: Window | None = None
 

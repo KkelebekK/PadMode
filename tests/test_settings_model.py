@@ -286,3 +286,9 @@ class AutostartTest(Base):
             s.apply()
         self.assertIn("Access denied", str(ctx.exception))
         self.assertTrue(s.dirty)
+
+    def test_start_and_stop(self):
+        s = self.session()
+        self.assertIsNone(s.service.stop())
+        self.assertIsNone(s.service.start(restart=True))
+        self.assertEqual(self.ctl.calls[-2:], ["stop", "restart"])
