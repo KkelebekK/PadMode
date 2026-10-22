@@ -364,7 +364,7 @@ class DaemonTest(unittest.TestCase):
             [(1, {"op": "hold"}), (1, {"op": "capture"})],
         )
         self.assertEqual([m for _, m in ctl.sent],
-                         [{"event": "held"},
+                         [{"event": "held", "pad": None},
                           {"event": "captured", "input": "LB"},
                           {"event": "act", "action": "page_prev"}])
 
@@ -390,6 +390,21 @@ class DaemonTest(unittest.TestCase):
             self.assertFalse(reply["ok"])
             self.assertIn("no.such.thing", reply["error"])
             self.assertEqual(daemon2._config, parse({}))
+
+
+class PadInfoTest(unittest.TestCase):
+    def test_held_says_which_pad(self):
+        from types import SimpleNamespace
+        log: list = []
+        reader = FakeReader(log, [WAKE])
+        reader.device = SimpleNamespace(name="DualSense Wireless Controller",
+                                        info=SimpleNamespace(vendor=0x054C))
+        ctl = FakeControl(log, [(1, {"op": "hold"})])
+        daemon = Daemon(parse({}), reader, FakeRunner(), control=ctl)
+        with self.assertLogs("padmode", "INFO"):
+            daemon.run()
+        self.assertEqual(ctl.sent[0][1]["pad"],
+                         {"name": "DualSense Wireless Controller", "vendor": 0x054C})
 
 
 class LockDuringSettingsTest(unittest.TestCase):

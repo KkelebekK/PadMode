@@ -20,6 +20,7 @@ controller away from it.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import logging
 import shlex
@@ -36,7 +37,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from .. import config  # noqa: E402
 from ..actions.builtin import ACTIONS  # noqa: E402
-from . import model, motion, themes  # noqa: E402
+from . import glyphs, model, motion, themes  # noqa: E402
 from .link import DaemonLink  # noqa: E402
 from .service import Service  # noqa: E402
 
@@ -158,7 +159,9 @@ class Window(Adw.ApplicationWindow):
         body.append(rail)
         body.append(self.stack)
         view.set_content(body)
-        self.hints = hint_bar()
+        self._detected = "xbox"     # the pad's family, once the daemon says
+        self._view = view
+        self.hints = hint_bar(self.family())
         view.add_bottom_bar(self.hints)
 
         self.pages: list[tuple[str, Callable[[], Adw.PreferencesPage]]] = [
@@ -168,6 +171,9 @@ class Window(Adw.ApplicationWindow):
             ("apps", self._apps_page),
             ("steam", self._steam_page),
         ]
+        self._tab_colours = {"general": model.SYSTEM, "buttons": model.KEYBOARD,
+                             "feel": model.POINTER, "apps": model.APPS,
+                             "steam": model.HOME}
         self._titles = {"general": ("General", "emblem-system-symbolic"),
                         "buttons": ("Buttons", "input-gaming-symbolic"),
                         "feel": ("Feel", "input-mouse-symbolic"),
@@ -176,7 +182,7 @@ class Window(Adw.ApplicationWindow):
         for name, build in self.pages:
             title, icon = self._titles[name]
             self.stack.add_titled_with_icon(build(), name, title, icon)
-            self.tabs.add(name, title, icon)
+            self.tabs.add(name, title, icon, self._tab_colours[name])
 
         self.connect("close-request", self._on_close_request)
         # Start on the first row, once there is something mapped to focus: a
@@ -230,6 +236,8 @@ class Window(Adw.ApplicationWindow):
         log.debug("pad: %s", event)
         if kind == "held":
             self._pad_held = True
+            pad = event.get("pad") or {}
+            self._detect(glyphs.family_of(pad.get("name"), pad.get("vendor")))
             self.hints.remove_css_class("idle")
         elif kind == "released":
             self._pad_held = False
@@ -568,6 +576,7 @@ class Window(Adw.ApplicationWindow):
                                  value=session.value(field))
             row = Adw.SpinRow(title=field.label, subtitle=field.help,
                               adjustment=adj, digits=field.digits)
+            row.add_prefix(tile(*model.icon_for_field(field)))
 
             def on_value(_a):
                 if not self._updating:
@@ -590,6 +599,7 @@ class Window(Adw.ApplicationWindow):
         if isinstance(field, model.Toggle):
             row = Adw.SwitchRow(title=field.label, subtitle=field.help,
                                 active=bool(session.value(field)))
+            row.add_prefix(tile(*model.icon_for_field(field)))
 
             def on_active(*_):
                 if not self._updating:
@@ -613,6 +623,7 @@ class Window(Adw.ApplicationWindow):
         values = [v for v, _ in field.options]
         row = Adw.ComboRow(title=field.label, subtitle=field.help,
                            model=Gtk.StringList.new([l for _, l in field.options]))
+        row.add_prefix(tile(*model.icon_for_field(field)))
         row.set_selected(values.index(session.value(field)))
 
         def on_selected(*_):
@@ -667,7 +678,8 @@ class Window(Adw.ApplicationWindow):
     def _binding_row(self, kind: str, button: str, value) -> Adw.ActionRow:
         row = Adw.ActionRow(title=GLib.markup_escape_text(
             model.action_label(kind, value)), activatable=True)
-        row.add_suffix(badge(button))
+        row.add_prefix(tile(*model.icon_for_binding(kind, value)))
+        row.add_suffix(badge(button, self.family()))
         remove = Gtk.Button(icon_name="user-trash-symbolic",
                             valign=Gtk.Align.CENTER, tooltip_text="Unbind")
         remove.add_css_class("flat")
@@ -705,6 +717,27 @@ class Window(Adw.ApplicationWindow):
         self.changed("buttons")
 
     # -- pages ---------------------------------------------------------
+    def family(self) -> str:
+        """Whose button labels to draw: the setting, or the pad in hand."""
+        chosen = self.session.value(model.GLYPHS)
+        return self._detected if chosen == "auto" else chosen
+
+    def _detect(self, family: str) -> None:
+        before = self.family()
+        self._detected = family
+        if self.family() != before:
+            self.relabel()
+
+    def relabel(self) -> None:
+        """Redraw everything that shows a pad button, in the current family."""
+        idle = self.hints.has_css_class("idle")
+        self._view.remove(self.hints)
+        self.hints = hint_bar(self.family())
+        if idle:
+            self.hints.add_css_class("idle")
+        self._view.add_bottom_bar(self.hints)
+        self._rebuild("buttons")
+
     def apply_theme(self, name: str) -> None:
         """Show a theme now. Saved only by Apply, like every other setting."""
         if name == self._theme:
@@ -725,6 +758,9 @@ class Window(Adw.ApplicationWindow):
         theme_row.connect("notify::selected", lambda *_: self.apply_theme(
             self.session.value(model.THEME)))
         look.add(theme_row)
+        glyph_row = self._field_row(model.GLYPHS)
+        glyph_row.connect("notify::selected", lambda *_: self.relabel())
+        look.add(glyph_row)
         page.add(look)
         group = Adw.PreferencesGroup(title="padmode")
         service = self.session.service
@@ -739,6 +775,7 @@ class Window(Adw.ApplicationWindow):
         switch = Adw.SwitchRow(title="Start padmode when you log in",
                                subtitle="Takes effect when you press Apply",
                                active=bool(self.session.autostart))
+        switch.add_prefix(tile("system-run-symbolic", model.POINTER))
 
         def toggled(*_):
             if not self._updating:
@@ -762,6 +799,9 @@ class Window(Adw.ApplicationWindow):
             title="Running" if running else "Not running",
             subtitle="The pad does what these settings say" if running else
                      "Nothing reads the pad until it starts")
+        status.add_prefix(tile("object-select-symbolic" if running
+                               else "media-playback-stop-symbolic",
+                               model.POINTER if running else model.HOME))
         button = Gtk.Button(label="Restart" if running else "Start",
                             valign=Gtk.Align.CENTER)
 
@@ -957,6 +997,7 @@ class Window(Adw.ApplicationWindow):
 
     def _overlay_row(self, name: str, overlay) -> Adw.ExpanderRow:
         row = Adw.ExpanderRow(title=name, subtitle=overlay.window_class)
+        row.add_prefix(tile("view-app-grid-symbolic", model.APPS))
         state = {"class": overlay.window_class,
                  "command": shlex.join(overlay.command) if overlay.command else ""}
 
@@ -1071,6 +1112,8 @@ class Window(Adw.ApplicationWindow):
             row = Adw.SwitchRow(title=GLib.markup_escape_text(app.name),
                                 subtitle=f"Hidden by default: {reason}" if reason
                                 else f"App {app.appid}", active=shown)
+            row.add_prefix(tile("applications-games-symbolic",
+                                model.HOME if reason is None else model.SYSTEM))
 
             def toggled(r, *_a, appid=app.appid, default=shown_by_default):
                 if self._updating:
@@ -1123,9 +1166,10 @@ class TabBar(Gtk.Fixed):
         # Sizes exist only after the first layout; place it there, unanimated.
         self.connect("map", lambda *_: GLib.timeout_add(30, self._snap))
 
-    def add(self, name: str, title: str, icon: str) -> None:
-        content = Adw.ButtonContent(label=title, icon_name=icon,
-                                    halign=Gtk.Align.START)
+    def add(self, name: str, title: str, icon: str, colour: int) -> None:
+        content = Gtk.Box(spacing=14, halign=Gtk.Align.START)
+        content.append(tile(icon, colour))
+        content.append(Gtk.Label(label=title))
         button = Gtk.Button(css_classes=["flat", "tab"], child=content)
         button.connect("clicked",
                        lambda _b: self._stack.set_visible_child_name(name))
@@ -1191,25 +1235,18 @@ class TabBar(Gtk.Fixed):
 
 
 # -- helpers ----------------------------------------------------------------
-_FACE = {"A": "pm-a", "B": "pm-b", "X": "pm-x", "Y": "pm-y"}
-_SHORT = {"START": "Start", "SELECT": "Select", "GUIDE": "Guide"}
+def badge(button: str, family: str = "xbox") -> Gtk.Label:
+    """A pad button as *this* pad prints it (``glyphs.py``): A, B, X, Y --
+    or ✕ ○ △ □ -- as coloured rounds, everything else as a small grey key."""
+    text, style = glyphs.glyph(button, family)
+    css = {"a": "pm-a", "b": "pm-b", "x": "pm-x", "y": "pm-y",
+           "chip": "pm-chip"}.get(style, f"pm-{style}")
+    return Gtk.Label(label=text, valign=Gtk.Align.CENTER,
+                     halign=Gtk.Align.CENTER, hexpand=False,
+                     css_classes=["pm-badge", css])
 
 
-def badge(button: str) -> Gtk.Label:
-    """A pad button as a console draws it: A, B, X, Y as coloured rounds in
-    their pad colours, the rest as small grey keys."""
-    if button.startswith(("LS_", "RS_", "DPAD_")):
-        text = model.button_label(button).replace("Left stick", "LS").replace(
-            "Right stick", "RS").replace("D-pad", "D")
-    else:
-        text = _SHORT.get(button, button)
-    label = Gtk.Label(label=text, valign=Gtk.Align.CENTER,
-                      halign=Gtk.Align.CENTER, hexpand=False,
-                      css_classes=["pm-badge", _FACE.get(button, "pm-chip")])
-    return label
-
-
-def hint_bar() -> Gtk.Box:
+def hint_bar(family: str = "xbox") -> Gtk.Box:
     """What the pad does here, along the bottom of the window."""
     bar = Gtk.Box(css_classes=["pm-hints"], spacing=0)
     for buttons, text in ((("A",), "Select"), (("B",), "Back"),
@@ -1217,10 +1254,47 @@ def hint_bar() -> Gtk.Box:
                           (("Y",), "Default"), (("GUIDE",), "Let go")):
         hint = Gtk.Box(spacing=6, css_classes=["pm-hint"])
         for b in buttons:
-            hint.append(badge(b))
+            hint.append(badge(b, family))
         hint.append(Gtk.Label(label=text))
         bar.append(hint)
     return bar
+
+
+_ICON_FILES: dict[str, Gio.Icon] = {}
+
+
+def _icon(name: str) -> Gio.Icon:
+    """Adwaita's own symbolic icon by file, else the theme's by name.
+
+    By file because the tile colours the icon, and that needs an icon GTK
+    can recolour: some icon themes (Tela, on the maintainer's machine) draw
+    their symbolic icons in fixed colours, measured -- the sound icons came
+    out orange on an orange tile. Adwaita's are true symbolic SVGs, and GTK 4
+    depends on them, so they are there wherever the window can open.
+    """
+    if name not in _ICON_FILES:
+        found = None
+        for base in os.environ.get("XDG_DATA_DIRS", "/usr/share").split(":"):
+            for path in Path(base, "icons/Adwaita/symbolic").glob(f"*/{name}.svg"):
+                found = Gio.FileIcon.new(Gio.File.new_for_path(str(path)))
+                break
+            if found:
+                break
+        _ICON_FILES[name] = found or Gio.ThemedIcon.new(name)
+    return _ICON_FILES[name]
+
+
+def tile(icon: str, colour: int) -> Gtk.Box:
+    """An icon on a coloured rounded square -- the iconography the
+    maintainer chose. ``colour`` is a slot in themes.TILE_KINDS."""
+    box = Gtk.Box(css_classes=["pm-tile", f"pm-c{colour}"],
+                  valign=Gtk.Align.CENTER, halign=Gtk.Align.START,
+                  hexpand=False)
+    image = Gtk.Image(gicon=_icon(icon), pixel_size=22, hexpand=False,
+                      halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+    image.set_size_request(42, 42)
+    box.append(image)
+    return box
 
 
 def _regenerate(window: "Window") -> None:

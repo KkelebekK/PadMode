@@ -1414,7 +1414,7 @@ class Daemon:
             self._send_event({"event": "released"})  # a newer window wins
         self._settings_client = client
         if self._settings_mode():
-            self._control.send(client, {"event": "held"})
+            self._control.send(client, {"event": "held", "pad": self._pad_info()})
             return
         if mode is Mode.OSK:
             self._close_osk()
@@ -1437,7 +1437,7 @@ class Daemon:
         self._state.capture = False
         log.info("the settings window has the pad -- %s lets go",
                  self._config.modifier)
-        self._control.send(client, {"event": "held"})
+        self._control.send(client, {"event": "held", "pad": self._pad_info()})
 
     def _open_settings(self) -> None:
         """Start the settings window, or bring the running one forward.
@@ -1454,6 +1454,16 @@ class Daemon:
             log.warning("could not start the settings window: %s", exc)
             return
         log.info("settings window requested")
+
+    def _pad_info(self) -> dict | None:
+        """Which pad this is, so the window can label its buttons the way the
+        pad prints them (``padmode/settings/glyphs.py``)."""
+        device = getattr(self._reader, "device", None)
+        if device is None:
+            return None
+        info = getattr(device, "info", None)
+        return {"name": getattr(device, "name", None),
+                "vendor": getattr(info, "vendor", None)}
 
     def _settings_mode(self) -> bool:
         """The window has the pad -- directly, or under a keyboard it opened."""

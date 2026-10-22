@@ -139,6 +139,14 @@ THEME = Choice(APPEARANCE, "theme", "Theme", "How this window looks", (
     ("amber", "Warm amber"),
 ))
 
+GLYPHS = Choice(APPEARANCE, "glyphs", "Button labels",
+                "Drawn the way your controller prints them", (
+    ("auto", "Automatic"),
+    ("xbox", "Xbox"),
+    ("playstation", "PlayStation"),
+    ("nintendo", "Nintendo"),
+))
+
 
 def default_of(field: Field) -> Any:
     return _attr(config.Config(), field)
@@ -229,6 +237,64 @@ def action_label(kind: str, value: Any) -> str:
     return {config.FRONTEND_BINDING: "Go home to the frontend",
             config.OSK_BINDING: "Desktop mode with the keyboard up",
             config.SETTINGS_BINDING: "This settings window"}.get(value, value)
+
+
+# -- icon tiles ---------------------------------------------------------------
+#: Tile colour slots, as numbered in themes.TILE_KINDS.
+MEDIA, SOUND, APPS, POINTER, KEYBOARD, SYSTEM, LOCK, HOME = range(1, 9)
+
+_ACTION_ICONS = {
+    "media.next": ("media-skip-forward-symbolic", MEDIA),
+    "media.previous": ("media-skip-backward-symbolic", MEDIA),
+    "media.play_pause": ("media-playback-start-symbolic", MEDIA),
+    "media.stop": ("media-playback-stop-symbolic", MEDIA),
+    "audio.volume_up": ("audio-volume-high-symbolic", SOUND),
+    "audio.volume_down": ("audio-volume-low-symbolic", SOUND),
+    "audio.toggle_mute": ("audio-volume-muted-symbolic", SOUND),
+    "mic.toggle_mute": ("microphone-sensitivity-muted-symbolic", SOUND),
+    config.FRONTEND_BINDING: ("go-home-symbolic", HOME),
+    config.OSK_BINDING: ("input-keyboard-symbolic", KEYBOARD),
+    config.SETTINGS_BINDING: ("emblem-system-symbolic", SYSTEM),
+}
+
+
+def icon_for_binding(kind: str, value: Any) -> tuple[str, int]:
+    """``(icon name, tile colour)`` for what a binding does."""
+    if kind == UNLOCK_MODE:
+        if value == "enter":
+            return "go-jump-symbolic", LOCK
+        if value in ("backspace", "clear"):
+            return "edit-clear-symbolic", LOCK
+        return "system-lock-screen-symbolic", LOCK
+    if isinstance(value, list):
+        return "utilities-terminal-symbolic", SYSTEM
+    if kind == DESKTOP_MODE:
+        if value == "osk":
+            return "input-keyboard-symbolic", KEYBOARD
+        if value.startswith("click."):
+            return "input-mouse-symbolic", POINTER
+        return "input-keyboard-symbolic", KEYBOARD
+    if config.overlay_name(value) is not None:
+        return "view-app-grid-symbolic", APPS
+    return _ACTION_ICONS.get(value, ("input-gaming-symbolic", SYSTEM))
+
+
+def icon_for_field(field: "Field") -> tuple[str, int]:
+    """``(icon name, tile colour)`` for a number, switch or choice."""
+    if field.table == APPEARANCE:
+        return (("preferences-desktop-appearance-symbolic", SYSTEM)
+                if field.key == "theme" else ("input-gaming-symbolic", KEYBOARD))
+    if field.table == OSK:
+        return "input-keyboard-symbolic", KEYBOARD
+    if field.table == UNLOCK:
+        return "system-lock-screen-symbolic", LOCK
+    if field.table == WINDOWS:
+        return "preferences-system-time-symbolic", APPS
+    if field.table == GENERAL and field.key == "volume_step":
+        return "audio-volume-high-symbolic", SOUND
+    if field.key in ("pointer_speed", "curve", "scroll_speed", "dead_zone"):
+        return "input-mouse-symbolic", POINTER
+    return "input-gaming-symbolic", POINTER
 
 
 def sort_buttons(names) -> list[str]:

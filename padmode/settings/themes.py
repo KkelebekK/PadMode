@@ -18,6 +18,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+#: What each icon tile colour stands for, in order: c1 .. c8.
+TILE_KINDS = ("media", "sound", "apps", "pointer", "keyboard", "system",
+              "lock", "home")
+
+#: libadwaita's palette, for the theme that follows the system.
+_ADW_TILES = ("var(--purple-3)", "var(--orange-3)", "var(--blue-3)",
+              "var(--green-4)", "var(--purple-4)", "var(--dark-2)",
+              "var(--yellow-5)", "var(--red-3)")
+
+#: PlayStation's own button colours: cross, circle, triangle, square.
+PS_COLOURS = ("#6c9cff", "#ff6b6b", "#3ccfa3", "#e48bd6")
+
 #: Face-button badge colours, Xbox order: A, B, X, Y. Text on them is white
 #: unless a theme says otherwise.
 XBOX_BADGES = ("#3b6d11", "#a32d2d", "#185fa5", "#ba7517")
@@ -42,6 +54,10 @@ class Theme:
     focus: str = "fill"
     badges: tuple[str, str, str, str] = XBOX_BADGES
     badge_fg: str = "#ffffff"
+    #: Icon tile colours, one per kind of setting (see TILE_KINDS), and the
+    #: icon colour on them. Empty: libadwaita's own palette.
+    tiles: tuple[str, ...] = ()
+    tile_fg: str = "#ffffff"
 
     @property
     def follows_system(self) -> bool:
@@ -56,19 +72,27 @@ THEMES: dict[str, Theme] = {t.name: t for t in (
           card="#343746", fg="#f8f8f2", muted="#6272a4", accent="#bd93f9",
           accent_fg="#282a36", pill="#44475a", pill_fg="#f8f8f2", radius=12,
           focus="bar", badges=("#50fa7b", "#ff5555", "#8be9fd", "#f1fa8c"),
-          badge_fg="#282a36"),
+          badge_fg="#282a36",
+          tiles=("#ff79c6", "#ffb86c", "#8be9fd", "#50fa7b", "#bd93f9",
+                 "#6272a4", "#f1fa8c", "#ff5555"), tile_fg="#282a36"),
     Theme("night", "Night blue", window="#11151c", rail="#0c0f14",
           card="#171c25", fg="#e8edf6", muted="#8a94a6", accent="#4c8dff",
           accent_fg="#ffffff", pill="#24324a", pill_fg="#e8edf6", radius=16,
-          focus="fill"),
+          focus="fill",
+          tiles=("#ff7aa8", "#ffb35c", "#5ccfff", "#5fd38d", "#9b87ff",
+                 "#5b6b85", "#ffd166", "#ff6b6b"), tile_fg="#0c0f14"),
     Theme("green", "Console green", window="#0e0f0e", rail="#151715",
           card="#171917", fg="#f1f3f1", muted="#8e968e", accent="#3fbf3f",
           accent_fg="#0e0f0e", pill="#3fbf3f", pill_fg="#0e0f0e", radius=6,
-          focus="ring"),
+          focus="ring",
+          tiles=("#ff6fb5", "#ffb347", "#4dd0e1", "#3fbf3f", "#a78bfa",
+                 "#4a514a", "#e6e65c", "#ff5c5c"), tile_fg="#0e0f0e"),
     Theme("amber", "Warm amber", window="#1d1915", rail="#251f1a",
           card="#2a231d", fg="#f6eee5", muted="#a89a8a", accent="#f0993b",
           accent_fg="#1d1915", pill="#3a2f25", pill_fg="#f6eee5", radius=22,
-          focus="bar"),
+          focus="bar",
+          tiles=("#ef7c8e", "#f0993b", "#6cc4c4", "#9ccc65", "#b39ddb",
+                 "#6d5f52", "#ffd54f", "#e57373"), tile_fg="#1d1915"),
 )}
 
 
@@ -98,6 +122,10 @@ def css(theme: Theme) -> str:
                   "  --pm-pill: alpha(currentColor, 0.1);",
                   "  --pm-pill-fg: currentColor;"]
     a, b, x, y = theme.badges
+    tiles = theme.tiles or _ADW_TILES
+    for i, colour in enumerate(tiles, start=1):
+        lines.append(f"  --pm-c{i}: {colour};")
+    lines.append(f"  --pm-tile-fg: {theme.tile_fg};")
     lines += [f"  --pm-a: {a}; --pm-b: {b}; --pm-x: {x}; --pm-y: {y};",
               f"  --pm-badge-fg: {theme.badge_fg};",
               f"  --pm-radius: {theme.radius}px;",
@@ -132,6 +160,18 @@ def _focus_rule(scope: str, theme: Theme) -> str:
             f"{row} .dim-label, {row} .subtitle {{ color: var(--accent-fg-color); }}")
 
 
+def tile_css() -> str:
+    """Icon tiles and PlayStation badges: shared rules, colours per theme."""
+    rules = [".pm-tile { min-width: 42px; min-height: 42px; border-radius: 11px;"
+             " color: var(--pm-tile-fg); }"]
+    rules += [f".pm-tile.pm-c{i} {{ background-color: var(--pm-c{i}); }}"
+              for i in range(1, len(TILE_KINDS) + 1)]
+    for name, colour in zip(("cross", "circle", "triangle", "square"), PS_COLOURS):
+        rules.append(f".pm-badge.pm-ps-{name} {{ background-color: {colour}; "
+                     f"color: #ffffff; font-size: 1em; }}")
+    return "\n".join(rules)
+
+
 def depth_css() -> str:
     """Rows as separate surfaces with a gap between them, so the focused one
     can rise out of the list rather than out of a box. Shared by every theme."""
@@ -148,4 +188,5 @@ def depth_css() -> str:
 
 
 def all_css() -> str:
-    return "\n\n".join([depth_css(), *(css(theme) for theme in THEMES.values())])
+    return "\n\n".join([depth_css(), tile_css(),
+                          *(css(theme) for theme in THEMES.values())])

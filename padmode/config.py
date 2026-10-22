@@ -341,6 +341,10 @@ class UnlockConfig:
 #: or dark scheme and accent colour; the rest are the window's own.
 THEMES = ("system", "dracula", "night", "green", "amber")
 
+#: How the settings window labels buttons: by the pad it finds ("auto"), or
+#: one family whatever is plugged in.
+GLYPHS = ("auto", "xbox", "playstation", "nintendo")
+
 
 @dataclass(frozen=True)
 class AppearanceConfig:
@@ -348,6 +352,7 @@ class AppearanceConfig:
     parses it so a typo is caught the same way as everywhere else."""
 
     theme: str = "system"
+    glyphs: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -555,11 +560,14 @@ def parse(data: dict[str, Any]) -> Config:
 
 
 def _parse_appearance(table: dict[str, Any]) -> AppearanceConfig:
-    _reject_unknown(table, {"theme"}, "appearance")
+    _reject_unknown(table, {"theme", "glyphs"}, "appearance")
     theme = table.get("theme", "system")
     if theme not in THEMES:
         raise ConfigError(f"appearance.theme must be one of {', '.join(THEMES)}")
-    return AppearanceConfig(theme=theme)
+    glyphs = table.get("glyphs", "auto")
+    if glyphs not in GLYPHS:
+        raise ConfigError(f"appearance.glyphs must be one of {', '.join(GLYPHS)}")
+    return AppearanceConfig(theme=theme, glyphs=glyphs)
 
 
 def _parse_unlock(table: dict[str, Any], modifier: str) -> UnlockConfig:
