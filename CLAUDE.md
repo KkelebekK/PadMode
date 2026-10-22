@@ -279,9 +279,13 @@ small writer for our own schema, or edits made in place. Decide that first.
 
 How it is built, in order — each step usable and tested before the next:
 
-1. `padmode/tomledit.py`: the in-place writer. Pure stdlib; every edit is
-   re-read with `tomllib` and checked with `config.parse` before it can be
-   written.
+1. ✅ `padmode/tomledit.py`: the in-place writer. Pure stdlib; every edit is
+   re-read with `tomllib` and compared with the document it was meant to
+   produce, and refused (text untouched) if anything else moved. Inline
+   tables, dotted keys and arrays of tables are refused, not guessed at.
+   `config.write` is the only door to the disk: `check_text` (the daemon's
+   parse and the Steam ignore list), then an atomic rename keeping the file's
+   mode.
 2. A control socket on the daemon (`$XDG_RUNTIME_DIR/padmode.sock`, line JSON
    like the keyboard's pipe): `reload` for Apply, `capture` for
    press-to-assign, and the `SETTINGS` mode — taking the pad, sending

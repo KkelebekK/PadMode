@@ -382,6 +382,60 @@ def load(path: Path | None = None) -> Config:
     return parse(data)
 
 
+def check_text(text: str) -> Config:
+    """What the daemon would make of ``text``, or :class:`ConfigError`.
+
+    Everything that reads this file is consulted, not just the daemon: the
+    Steam generator's ignore list lives here too, and a file one of them
+    refuses must never be written (CLAUDE.md §3.5, v0.8).
+    """
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"not valid TOML: {exc}") from exc
+    cfg = parse(data)
+    # Imported here, never at the top: the daemon must not import the
+    # metadata generators (§2), and only the settings window writes.
+    from .metadata import steam
+
+    try:
+        steam.parse_ignore(data)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    return cfg
+
+
+def write(text: str, path: Path | None = None) -> Config:
+    """Write ``text`` as the config file, if and only if it is accepted.
+
+    Atomic: the new text lands in a temporary file beside the old one and is
+    renamed over it, so a crash mid-write leaves the old file, never half of
+    the new one. The file keeps its permissions.
+    """
+    cfg = check_text(text)
+    path = path or default_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    try:
+        mode = path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        mode = 0o644
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except OSError as exc:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise ConfigError(f"cannot write {path}: {exc}") from exc
+    return cfg
+
+
 def parse(data: dict[str, Any]) -> Config:
     """Build a Config from already-parsed TOML data.
 
