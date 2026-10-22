@@ -116,6 +116,17 @@ class Document:
         expected = self.data
         _delete(expected, table + (key,))
         self._commit(text, expected)
+        # A section left with nothing in it -- no keys, no sub-tables, not even
+        # a comment -- goes too. Otherwise setting a value and putting it back
+        # would leave an empty [header] behind, and the file would differ from
+        # what it was although nothing in it means anything different.
+        if table and _lookup(self._data, table) == {}:
+            header = next((h for h in self._headers if h.path == table), None)
+            if header is not None:
+                later = [h.start for h in self._headers if h.start > header.start]
+                end = min(later) if later else len(self._text)
+                if not self._text[header.end:end].strip():
+                    self.remove_table(table)
         return True
 
     def remove_table(self, table: Sequence[str]) -> bool:

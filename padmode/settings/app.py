@@ -1,0 +1,1097 @@
+"""The settings window: GTK 4 and libadwaita, driven by pad, keys or mouse.
+
+``python -m padmode.settings`` lands here, and nothing else imports this
+module: GTK must never reach the daemon's import path (CLAUDE.md §2).
+
+Everything the window changes goes through :class:`~padmode.settings.model.
+Session`; this file only draws it and routes input. The pad arrives already
+digested by the daemon (:mod:`padmode.control`): ``nav`` steps move the same
+focus the keyboard's arrows do, and ``act`` events are the fixed actions of
+CLAUDE.md §3.5. Each row the window builds registers a :class:`Handler`, so
+"select", "left", "right" and "reset" mean the right thing for a number, a
+switch, a choice, a button binding or a text field -- and keyboard and mouse
+users get the stock behaviour of the same widgets.
+
+**The pad is the window's only while the window is active.** Focus moving to a
+game lets go of it, so a window left open behind a game can never take the
+controller away from it.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import shlex
+import subprocess
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
+
+from .. import config  # noqa: E402
+from ..actions.builtin import ACTIONS  # noqa: E402
+from . import model  # noqa: E402
+from .link import DaemonLink  # noqa: E402
+
+log = logging.getLogger("padmode.settings")
+
+APP_ID = "io.github.KkelebekK.PadMode.Settings"
+
+#: How far one wheel click of the right stick scrolls a page, in pixels.
+SCROLL_STEP = 48
+
+CSS = b"""
+.padmode-settings row { min-height: 52px; }
+.padmode-settings .binding-button { font-weight: bold; }
+.padmode-settings .capturing { background-color: alpha(@accent_bg_color, 0.25); }
+"""
+
+_DIRECTIONS = {
+    "up": Gtk.DirectionType.UP,
+    "down": Gtk.DirectionType.DOWN,
+    "left": Gtk.DirectionType.LEFT,
+    "right": Gtk.DirectionType.RIGHT,
+}
+
+
+@dataclass
+class Handler:
+    """What the pad does to one row."""
+
+    select: Callable[[], None] | None = None
+    #: Left / right: ``adjust(-1)`` / ``adjust(+1)``. Returns False to let the
+    #: step move focus instead.
+    adjust: Callable[[int], bool] | None = None
+    reset: Callable[[], None] | None = None
+
+
+class Window(Adw.ApplicationWindow):
+    def __init__(self, app: Adw.Application, session: model.Session) -> None:
+        super().__init__(application=app, title="padmode settings")
+        self.session = session
+        self.link = DaemonLink()
+        self._handlers: dict[Gtk.Widget, Handler] = {}
+        self._watch: int | None = None
+        self._capturing: Callable[[str], None] | None = None
+        self._capture_row: Gtk.Widget | None = None
+        self._let_go = False   # Guide pressed: do not take the pad back
+        self._updating = False
+        self._dialog: Adw.Dialog | None = None
+        #: The text row A put the caret in, until B takes it back out.
+        self._editing: Adw.EntryRow | None = None
+        self.set_default_size(820, 760)
+        self.add_css_class("padmode-settings")
+
+        self.toasts = Adw.ToastOverlay()
+        view = Adw.ToolbarView()
+        self.toasts.set_child(view)
+        self.set_content(self.toasts)
+
+        header = Adw.HeaderBar()
+        self.apply_button = Gtk.Button(label="Apply")
+        self.apply_button.add_css_class("suggested-action")
+        self.apply_button.connect("clicked", lambda _b: self.apply())
+        header.pack_end(self.apply_button)
+        self.stack = Adw.ViewStack()
+        switcher = Adw.ViewSwitcher(stack=self.stack,
+                                    policy=Adw.ViewSwitcherPolicy.WIDE)
+        header.set_title_widget(switcher)
+        view.add_top_bar(header)
+
+        self.banner = Adw.Banner()
+        self.banner.connect("button-clicked", lambda _b: self._banner_action())
+        self._banner_do: Callable[[], None] | None = None
+        view.add_top_bar(self.banner)
+        view.set_content(self.stack)
+
+        self.pages: list[tuple[str, Callable[[], Adw.PreferencesPage]]] = [
+            ("buttons", self._buttons_page),
+            ("feel", self._feel_page),
+            ("apps", self._apps_page),
+            ("steam", self._steam_page),
+        ]
+        self._titles = {"buttons": ("Buttons", "input-gaming-symbolic"),
+                        "feel": ("Feel", "preferences-system-symbolic"),
+                        "apps": ("Apps", "view-app-grid-symbolic"),
+                        "steam": ("Steam", "applications-games-symbolic")}
+        for name, build in self.pages:
+            title, icon = self._titles[name]
+            self.stack.add_titled_with_icon(build(), name, title, icon)
+
+        self.connect("close-request", self._on_close_request)
+        # Start on the first row, once there is something mapped to focus: a
+        # callback queued before that is silently lost.
+        self.connect("map", lambda _w: GLib.timeout_add(80, self._focus_first))
+        self.connect("notify::is-active", lambda *_: self._activity_changed())
+        self._refresh_status()
+
+    # -- the daemon ----------------------------------------------------
+    def _connect(self) -> bool:
+        if self.link.connected:
+            return True
+        if not self.link.connect():
+            return False
+        self._watch = GLib.io_add_watch(
+            self.link.fileno(), GLib.PRIORITY_DEFAULT,
+            GLib.IOCondition.IN | GLib.IOCondition.HUP, self._on_link,
+        )
+        return True
+
+    def _activity_changed(self) -> None:
+        if self.is_active():
+            if not self._let_go:
+                self.hold()
+        else:
+            self._let_go = False
+            if self.link.connected:
+                self.link.send({"op": "release"})
+
+    def hold(self) -> None:
+        self._let_go = False
+        if self._connect():
+            self.link.send({"op": "hold"})
+        self._refresh_status()
+
+    def _on_link(self, _fd, _cond) -> bool:
+        events = self.link.read()
+        if events is None:
+            self._watch = None
+            self._stop_capture()
+            self._refresh_status()
+            return False
+        for event in events:
+            self._on_event(event)
+        return True
+
+    def _on_event(self, event: dict) -> None:
+        kind = event.get("event")
+        log.debug("pad: %s", event)
+        if kind == "held":
+            self._pad_held = True
+        elif kind == "released":
+            self._pad_held = False
+            self._let_go = True
+            self._stop_capture()
+        elif kind == "refused":
+            self._pad_held = False
+            self.toast(f"The pad is busy: {event.get('reason')}")
+        elif kind == "nav":
+            self.navigate(event.get("dir", ""))
+        elif kind == "act":
+            self.act(event.get("action", ""))
+        elif kind == "scroll":
+            self.scroll(int(event.get("amount", 0)))
+        elif kind == "captured":
+            callback, self._capturing = self._capturing, None
+            self._clear_capture_style()
+            if callback is not None:
+                callback(event.get("input", ""))
+        elif kind == "cancelled":
+            self._stop_capture(tell_daemon=False)
+        self._refresh_status()
+
+    _pad_held = False
+
+    # -- pad input -----------------------------------------------------
+    def navigate(self, direction: str) -> None:
+        self.set_focus_visible(True)
+        handler = self._handler_for(self.get_focus())
+        if direction in ("left", "right") and handler and handler.adjust:
+            if handler.adjust(-1 if direction == "left" else 1):
+                return
+        if self._dialog is not None:
+            # Through the dialog's fields and buttons in order. libadwaita
+            # leaves focus on an internal widget that directional focus cannot
+            # leave, measured: four presses, focus never moved.
+            stops = _dialog_stops(self._dialog)
+            if stops:
+                focus = self.get_focus()
+                current = next((i for i, w in enumerate(stops)
+                                if focus is w or (focus and focus.is_ancestor(w))),
+                               None)
+                step = 1 if direction in ("down", "right") else -1
+                i = 0 if current is None else max(0, min(len(stops) - 1,
+                                                        current + step))
+                stops[i].grab_focus()
+            return
+        focus = self.get_focus()
+        row = _row_of(focus)
+        if row is None:
+            self._focus_first()  # from nowhere, or from the header bar
+            return
+        if direction in ("up", "down"):
+            # Row to row, like a console menu. GTK's own directional focus
+            # steps *into* a row -- onto its trash button -- which is right
+            # for a mouse-and-keyboard form and wrong for a pad.
+            rows = [r for r in _rows(self.stack.get_visible_child()) if _usable(r)]
+            i = rows.index(row) if row in rows else 0
+            j = max(0, min(len(rows) - 1, i + (1 if direction == "down" else -1)))
+            rows[j].grab_focus()
+            return
+        # Left and right walk the row's own controls: the row, then whatever
+        # buttons it carries, and stop at either end.
+        stops = [row, *[w for w in _focusables(row) if w is not row]]
+        current = next((w for w in stops if focus is w or (
+            focus is not None and focus.is_ancestor(w) and w is not row)), row)
+        i = stops.index(current)
+        j = max(0, min(len(stops) - 1, i + (1 if direction == "right" else -1)))
+        stops[j].grab_focus()
+
+    def act(self, action: str) -> None:
+        self.set_focus_visible(True)
+        if self._dialog is not None:
+            if action == "back":
+                self._dialog.close()
+            elif action == "select":
+                self._activate(self.get_focus())
+            return
+        if action == "select":
+            self._activate(self.get_focus())
+        elif action == "back":
+            if self._editing is not None:
+                # Out of the text field A put us in, not out of the window. A
+                # number's box also holds text focus, but nobody "entered" it.
+                row, self._editing = self._editing, None
+                row.grab_focus()
+            else:
+                self.close()
+        elif action in ("page_prev", "page_next"):
+            names = [name for name, _ in self.pages]
+            i = names.index(self.stack.get_visible_child_name())
+            i = (i + (1 if action == "page_next" else -1)) % len(names)
+            self.stack.set_visible_child_name(names[i])
+            GLib.idle_add(self._focus_first)
+        elif action == "apply":
+            self.apply()
+        elif action == "reset":
+            handler = self._handler_for(self.get_focus())
+            if handler and handler.reset:
+                handler.reset()
+
+    def scroll(self, amount: int) -> None:
+        page = self.stack.get_visible_child()
+        scrolled = _find(page, Gtk.ScrolledWindow)
+        if scrolled is None:
+            return
+        adj = scrolled.get_vadjustment()
+        adj.set_value(adj.get_value() + amount * SCROLL_STEP)
+
+    def _activate(self, widget: Gtk.Widget | None) -> None:
+        handler = self._handler_for(widget)
+        if handler and handler.select:
+            handler.select()
+        elif isinstance(widget, Gtk.Button):
+            widget.emit("clicked")
+        elif widget is not None:
+            widget.activate()
+
+    def _handler_for(self, widget: Gtk.Widget | None) -> Handler | None:
+        while widget is not None:
+            if widget in self._handlers:
+                return self._handlers[widget]
+            widget = widget.get_parent()
+        return None
+
+    def _focus_first(self) -> bool:
+        """The first row of the page -- not the first focusable widget, which
+        is a header button, and starting there made the first step of the pad
+        land somewhere the user was not looking."""
+        if self._dialog is not None:
+            stops = _dialog_stops(self._dialog)
+            if stops:
+                stops[0].grab_focus()
+            return False
+        rows = _rows(self.stack.get_visible_child())
+        if rows:
+            rows[0].grab_focus()
+        return False
+
+    # -- press-to-assign -----------------------------------------------
+    def capture(self, row: Gtk.Widget, prompt: str,
+                done: Callable[[str], None]) -> None:
+        """Ask the pad for a button; ``done`` gets its name."""
+        if not (self.link.connected and self._pad_held):
+            self._pick_from_list(prompt, done)
+            return
+        self._capturing = done
+        self._capture_row = row
+        row.add_css_class("capturing")
+        self.link.send({"op": "capture"})
+        self.toast(f"{prompt} — press a button on the pad. Guide cancels.", 3)
+
+    def _stop_capture(self, tell_daemon: bool = True) -> None:
+        if self._capturing is not None and tell_daemon and self.link.connected:
+            self.link.send({"op": "capture", "cancel": True})
+        self._capturing = None
+        self._clear_capture_style()
+
+    def _clear_capture_style(self) -> None:
+        if self._capture_row is not None:
+            self._capture_row.remove_css_class("capturing")
+            self._capture_row = None
+
+    def _pick_from_list(self, prompt: str, done: Callable[[str], None]) -> None:
+        """The fallback without a pad: choose the button by name."""
+        names = [n for n in model.BUTTON_ORDER]
+        labels = Gtk.StringList.new([model.button_label(n) for n in names])
+        drop = Gtk.DropDown(model=labels)
+        self._handlers[drop] = _drop_handler(drop)
+        dialog = Adw.AlertDialog(heading=prompt, body="Which button?")
+        dialog.set_extra_child(drop)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("ok", "Use it")
+        dialog.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
+        dialog.connect("response", lambda _d, r: r == "ok" and done(
+            names[drop.get_selected()]))
+        self._present(dialog)
+
+    # -- apply and close -----------------------------------------------
+    def apply(self) -> bool:
+        if not self.session.dirty:
+            self.toast("Nothing to apply")
+            return True
+        try:
+            self.session.apply()
+        except config.ConfigError as exc:
+            self.toast(f"Not saved: {exc}", 6)
+            self._refresh_status()
+            return False
+        reply = self.link.reload()
+        if reply is None:
+            self.toast("Saved. padmode is not running; it will use these "
+                       "settings when it starts.", 5)
+        elif not reply.get("ok"):
+            self.toast(f"Saved, but padmode refused it: {reply.get('error')}", 6)
+        elif reply.get("restart"):
+            toast = Adw.Toast(title="Applied. Some changes need a restart: "
+                              + ", ".join(reply["restart"]), timeout=8)
+            toast.set_button_label("Restart padmode")
+            toast.connect("button-clicked", lambda _t: _restart_daemon())
+            self.toasts.add_toast(toast)
+        else:
+            self.toast("Applied")
+        self._refresh_status()
+        return True
+
+    def _on_close_request(self, _win) -> bool:
+        if not self.session.dirty:
+            self._shutdown()
+            return False
+        dialog = Adw.AlertDialog(
+            heading="Apply your changes?",
+            body="Some changes have not been applied yet.",
+        )
+        dialog.add_response("cancel", "Go back")
+        dialog.add_response("discard", "Close without applying")
+        dialog.add_response("apply", "Apply and close")
+        dialog.set_response_appearance("discard", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_response_appearance("apply", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("apply")
+        dialog.set_close_response("cancel")
+
+        def chosen(_d, response):
+            if response == "apply" and self.apply():
+                self._shutdown()
+                self.destroy()
+            elif response == "discard":
+                self.session.discard()
+                self._shutdown()
+                self.destroy()
+
+        dialog.connect("response", chosen)
+        self._present(dialog)
+        return True
+
+    def _shutdown(self) -> None:
+        if self.link.connected:
+            self.link.send({"op": "release"})
+            self.link.close()
+
+    # -- status --------------------------------------------------------
+    def _refresh_status(self) -> None:
+        self.apply_button.set_sensitive(self.session.dirty
+                                        and self.session.problem is None)
+        if self.session.problem:
+            self._banner("Can't apply yet: " + self.session.problem, None, None)
+        elif not self.link.connected and not self._connect_quietly():
+            self._banner("padmode is not running — changes are saved, and "
+                         "used when it starts", None, None)
+        elif not self._pad_held and self._let_go:
+            self._banner("The pad is free again.", "Use the pad", self.hold)
+        else:
+            self.banner.set_revealed(False)
+
+    def _connect_quietly(self) -> bool:
+        return self._connect()
+
+    def _banner(self, text: str, button: str | None,
+                action: Callable[[], None] | None) -> None:
+        self.banner.set_title(text)
+        self.banner.set_button_label(button)
+        self._banner_do = action
+        self.banner.set_revealed(True)
+
+    def _banner_action(self) -> None:
+        if self._banner_do is not None:
+            self._banner_do()
+
+    def toast(self, text: str, seconds: int = 2) -> None:
+        self.toasts.add_toast(Adw.Toast(title=GLib.markup_escape_text(text),
+                                        timeout=seconds))
+
+    def _present(self, dialog: Adw.Dialog) -> None:
+        self._dialog = dialog
+        dialog.connect("closed", lambda _d: self._dialog_closed())
+        dialog.present(self)
+        GLib.idle_add(self._focus_first)
+
+    def _dialog_closed(self) -> None:
+        self._dialog = None
+
+    def changed(self, rebuild: str | None = None) -> None:
+        """After any edit: the Apply button, the banner, maybe a page."""
+        if rebuild is not None:
+            self._rebuild(rebuild)
+        self._refresh_status()
+
+    def _rebuild(self, name: str) -> None:
+        focus_index = _row_index(self.get_focus())
+        old = self.stack.get_child_by_name(name)
+        for widget in list(self._handlers):
+            if widget.is_ancestor(old):
+                del self._handlers[widget]
+        build = dict(self.pages)[name]
+        title, icon = self._titles[name]
+        visible = self.stack.get_visible_child_name() == name
+        self.stack.remove(old)
+        page = build()
+        self.stack.add_titled_with_icon(page, name, title, icon)
+        # Keep the page order the user knows.
+        names = [n for n, _ in self.pages]
+        for n in names[names.index(name) + 1:]:
+            child = self.stack.get_child_by_name(n)
+            self.stack.remove(child)
+            t, i = self._titles[n]
+            self.stack.add_titled_with_icon(child, n, t, i)
+        if visible:
+            self.stack.set_visible_child_name(name)
+            GLib.idle_add(lambda: _refocus(page, focus_index))
+
+    # -- rows ----------------------------------------------------------
+    def _field_row(self, field: model.Field) -> Adw.PreferencesRow:
+        session = self.session
+        if isinstance(field, model.Number):
+            adj = Gtk.Adjustment(lower=field.minimum, upper=field.maximum,
+                                 step_increment=field.step,
+                                 page_increment=field.step * 10,
+                                 value=session.value(field))
+            row = Adw.SpinRow(title=field.label, subtitle=field.help,
+                              adjustment=adj, digits=field.digits)
+
+            def on_value(_a):
+                if not self._updating:
+                    session.set(field, adj.get_value())
+                    self.changed()
+
+            adj.connect("value-changed", on_value)
+
+            def adjust(delta):
+                adj.set_value(adj.get_value() + delta * field.step)
+                return True
+
+            def reset():
+                session.reset(field)
+                self._quietly(lambda: adj.set_value(session.value(field)))
+                self.changed()
+
+            self._handlers[row] = Handler(adjust=adjust, reset=reset)
+            return row
+        if isinstance(field, model.Toggle):
+            row = Adw.SwitchRow(title=field.label, subtitle=field.help,
+                                active=bool(session.value(field)))
+
+            def on_active(*_):
+                if not self._updating:
+                    session.set(field, row.get_active())
+                    self.changed()
+
+            row.connect("notify::active", on_active)
+
+            def adjust(delta):
+                row.set_active(delta > 0)
+                return True
+
+            def reset():
+                session.reset(field)
+                self._quietly(lambda: row.set_active(bool(session.value(field))))
+                self.changed()
+
+            self._handlers[row] = Handler(select=lambda: row.set_active(
+                not row.get_active()), adjust=adjust, reset=reset)
+            return row
+        values = [v for v, _ in field.options]
+        row = Adw.ComboRow(title=field.label, subtitle=field.help,
+                           model=Gtk.StringList.new([l for _, l in field.options]))
+        row.set_selected(values.index(session.value(field)))
+
+        def on_selected(*_):
+            if not self._updating:
+                session.set(field, values[row.get_selected()])
+                self.changed()
+
+        row.connect("notify::selected", on_selected)
+
+        def adjust(delta):
+            row.set_selected((row.get_selected() + delta) % len(values))
+            return True
+
+        def reset():
+            session.reset(field)
+            self._quietly(lambda: row.set_selected(values.index(session.value(field))))
+            self.changed()
+
+        self._handlers[row] = Handler(select=lambda: adjust(1), adjust=adjust,
+                                      reset=reset)
+        return row
+
+    def _quietly(self, change: Callable[[], None]) -> None:
+        self._updating = True
+        try:
+            change()
+        finally:
+            self._updating = False
+
+    def _binding_row(self, kind: str, button: str, value) -> Adw.ActionRow:
+        row = Adw.ActionRow(title=GLib.markup_escape_text(
+            model.action_label(kind, value)), activatable=True)
+        label = Gtk.Label(label=model.button_label(button))
+        label.add_css_class("binding-button")
+        row.add_suffix(label)
+        remove = Gtk.Button(icon_name="user-trash-symbolic",
+                            valign=Gtk.Align.CENTER, tooltip_text="Unbind")
+        remove.add_css_class("flat")
+        remove.connect("clicked", lambda _b: self._unbind(kind, button))
+        row.add_suffix(remove)
+
+        def chosen(new):
+            if new == button:
+                return
+            lost = self.session.move(kind, button, new)
+            message = f"Now on {model.button_label(new)}"
+            if lost:
+                message += (f" — {model.action_label(kind, lost[1])} is no "
+                            "longer bound")
+            self.toast(message, 4)
+            self.changed("buttons")
+
+        def select():
+            self.capture(row, model.action_label(kind, value), chosen)
+
+        row.connect("activated", lambda _r: select())
+        self._handlers[row] = Handler(select=select,
+                                      reset=lambda: self._reset_binding(kind, button))
+        return row
+
+    def _unbind(self, kind: str, button: str) -> None:
+        self.session.unbind(kind, button)
+        self.toast(f"{model.button_label(button)} does nothing now")
+        self.changed("buttons")
+
+    def _reset_binding(self, kind: str, button: str) -> None:
+        table = model._TABLES[kind]
+        self.session.doc.remove(table, button)
+        self.session._settle()
+        self.changed("buttons")
+
+    # -- pages ---------------------------------------------------------
+    def _buttons_page(self) -> Adw.PreferencesPage:
+        page = Adw.PreferencesPage()
+        s = self.session
+        for kind, title, description in (
+            (model.GUIDE, "Hold Guide and press",
+             "Select a row, then press the button you want for it"),
+            (model.DESKTOP_MODE, "Desktop mode", "While the pad is a mouse"),
+        ):
+            group = Adw.PreferencesGroup(title=title, description=description)
+            bindings = s.bindings(kind)
+            for button in model.sort_buttons(bindings):
+                group.add(self._binding_row(kind, button, bindings[button]))
+            group.add(self._add_binding_row(kind))
+            group.add(self._restore_row(kind))
+            page.add(group)
+
+        group = Adw.PreferencesGroup(
+            title="Unlock with the pad",
+            description="Types your password at the lock screen. Needs a "
+            "password made only of digits — easier to guess, and usually your "
+            "sudo password too. Use a long one.")
+        group.add(self._field_row(model.UNLOCK_SWITCH))
+        layouts = Adw.ActionRow(title="Layout", subtitle="Stick dial, or the "
+                                "Xbox lock screen's buttons")
+        for name, label in (("dial", "Dial"), ("xbox", "Xbox")):
+            button = Gtk.Button(label=label, valign=Gtk.Align.CENTER)
+            button.connect("clicked", lambda _b, n=name: self._layout(n))
+            layouts.add_suffix(button)
+        group.add(layouts)
+        bindings = s.bindings(model.UNLOCK_MODE)
+        by_action = sorted(bindings.items(), key=lambda kv: (
+            _digit_order(kv[1]), model.sort_buttons([kv[0]])))
+        for button, value in by_action:
+            group.add(self._binding_row(model.UNLOCK_MODE, button, value))
+        page.add(group)
+        return page
+
+    def _layout(self, name: str) -> None:
+        self.session.unlock_layout(name)
+        self.toast("Dial layout" if name == "dial" else "Xbox layout")
+        self.changed("buttons")
+
+    def _restore_row(self, kind: str) -> Adw.ButtonRow:
+        row = Adw.ButtonRow(title="Restore the defaults")
+
+        def restore(*_):
+            self.session.reset_bindings(kind)
+            self.toast("Defaults restored")
+            self.changed("buttons")
+
+        row.connect("activated", restore)
+        return row
+
+    def _add_binding_row(self, kind: str) -> Adw.ActionRow:
+        row = Adw.ActionRow(title="Add a button…", activatable=True)
+        row.add_prefix(Gtk.Image(icon_name="list-add-symbolic"))
+        choices = self._binding_choices(kind)
+
+        def select():
+            labels = Gtk.StringList.new([label for _, label in choices])
+            drop = Gtk.DropDown(model=labels)
+            self._handlers[drop] = _drop_handler(drop)
+            dialog = Adw.AlertDialog(heading="What should it do?")
+            dialog.set_extra_child(drop)
+            dialog.add_response("cancel", "Cancel")
+            dialog.add_response("ok", "Choose a button")
+            dialog.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
+
+            def picked(_d, response):
+                if response != "ok":
+                    return
+                value, label = choices[drop.get_selected()]
+
+                def bound(button):
+                    self.session.bind(kind, button, value)
+                    self.toast(f"{label}: {model.button_label(button)}")
+                    self.changed("buttons")
+
+                GLib.idle_add(lambda: self.capture(row, label, bound) and False)
+
+            dialog.connect("response", picked)
+            self._present(dialog)
+
+        row.connect("activated", lambda _r: select())
+        self._handlers[row] = Handler(select=select)
+        return row
+
+    def _binding_choices(self, kind: str) -> list[tuple[object, str]]:
+        if kind == model.DESKTOP_MODE:
+            values = ["click.left", "click.right", "click.middle", "osk",
+                      "key.enter", "key.esc", "key.tab", "key.shift+tab",
+                      "key.alt", "key.super", "key.up", "key.down", "key.left",
+                      "key.right", "key.pageup", "key.pagedown", "key.f11"]
+        else:
+            cfg = self.session.config
+            values = [*ACTIONS, *(f"overlay.{o}" for o in cfg.overlays),
+                      config.OSK_BINDING, config.SETTINGS_BINDING]
+            if cfg.frontend is not None:
+                values.append(config.FRONTEND_BINDING)
+        return [(v, model.action_label(kind, v)) for v in values]
+
+    def _feel_page(self) -> Adw.PreferencesPage:
+        page = Adw.PreferencesPage()
+        for title, fields in model.FEEL:
+            group = Adw.PreferencesGroup(title=title)
+            for field in fields:
+                group.add(self._field_row(field))
+            page.add(group)
+        return page
+
+    def _apps_page(self) -> Adw.PreferencesPage:
+        page = Adw.PreferencesPage()
+        cfg = self.session.config
+        group = Adw.PreferencesGroup(
+            title="Overlays",
+            description="Apps that come up over your game on a Guide combo")
+        for name, overlay in sorted(cfg.overlays.items()):
+            group.add(self._overlay_row(name, overlay))
+        add = Adw.ActionRow(title="Add an app…", activatable=True)
+        add.add_prefix(Gtk.Image(icon_name="list-add-symbolic"))
+        add.connect("activated", lambda _r: self._new_overlay())
+        self._handlers[add] = Handler(select=self._new_overlay)
+        group.add(add)
+        page.add(group)
+
+        group = Adw.PreferencesGroup(
+            title="Frontend", description="Where the home button takes you")
+        fe = cfg.frontend
+        cls = self._entry_row("Window class", fe.window_class if fe else "",
+                              lambda text: self._frontend(text, None))
+        cmd = self._entry_row("Command", shlex.join(fe.command) if fe and fe.command
+                              else "", lambda text: self._frontend(None, text))
+        group.add(cls)
+        group.add(cmd)
+        if fe is not None:
+            remove = Adw.ButtonRow(title="Remove the frontend")
+            remove.add_css_class("destructive-action")
+            remove.connect("activated", lambda _r: (self.session.remove_frontend(),
+                                                    self.changed("apps"),
+                                                    self.changed("buttons")))
+            group.add(remove)
+        page.add(group)
+
+        group = Adw.PreferencesGroup(title="Timing")
+        for field in model.OVERLAY_TIMING:
+            group.add(self._field_row(field))
+        page.add(group)
+        return page
+
+    def _overlay_row(self, name: str, overlay) -> Adw.ExpanderRow:
+        row = Adw.ExpanderRow(title=name, subtitle=overlay.window_class)
+        state = {"class": overlay.window_class,
+                 "command": shlex.join(overlay.command) if overlay.command else ""}
+
+        def save():
+            try:
+                command = shlex.split(state["command"]) or None
+            except ValueError:
+                return
+            self.session.set_overlay(name, state["class"], command)
+            self.changed()
+
+        row.add_row(self._entry_row("Window class", state["class"],
+                                    lambda t: (state.update({"class": t}), save())))
+        row.add_row(self._entry_row("Command", state["command"],
+                                    lambda t: (state.update({"command": t}), save())))
+        remove = Adw.ButtonRow(title=f"Remove {name}")
+        remove.add_css_class("destructive-action")
+        remove.connect("activated", lambda _r: (self.session.remove_overlay(name),
+                                                self.changed("apps"),
+                                                self.changed("buttons")))
+        row.add_row(remove)
+        self._handlers[row] = Handler(select=lambda: row.set_expanded(
+            not row.get_expanded()))
+        return row
+
+    def _new_overlay(self) -> None:
+        dialog = Adw.AlertDialog(heading="Add an app",
+                                 body="It comes up over your game on a Guide combo.")
+        box = Gtk.ListBox(css_classes=["boxed-list"])
+        name = Adw.EntryRow(title="Name (letters, digits, - or _)")
+        cls = Adw.EntryRow(title="Window class, e.g. discord")
+        cmd = Adw.EntryRow(title="Command to start it (optional)")
+        for row in (name, cls, cmd):
+            box.append(row)
+            self._handlers[row] = Handler(select=lambda r=row: self._type_into(r))
+        dialog.set_extra_child(box)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("add", "Add")
+        dialog.set_response_appearance("add", Adw.ResponseAppearance.SUGGESTED)
+
+        def added(_d, response):
+            if response != "add":
+                return
+            key = name.get_text().strip()
+            if not key or not key.replace("_", "").replace("-", "").isalnum():
+                self.toast("That name won't work: letters, digits, - or _")
+                return
+            try:
+                command = shlex.split(cmd.get_text()) or None
+            except ValueError:
+                command = None
+            self.session.set_overlay(key, cls.get_text().strip() or key, command)
+            self.toast(f"Added {key}. Give it a button on the Buttons page.", 4)
+            self.changed("apps")
+            self.changed("buttons")
+
+        dialog.connect("response", added)
+        self._present(dialog)
+
+    def _frontend(self, window_class: str | None, command: str | None) -> None:
+        fe = self.session.config.frontend
+        cls = window_class if window_class is not None else (fe.window_class if fe else "")
+        if not cls.strip():
+            return
+        if command is None:
+            argv = fe.command if fe else None
+        else:
+            try:
+                argv = shlex.split(command) or None
+            except ValueError:
+                return
+        self.session.set_frontend(cls.strip(), argv)
+        self.changed()
+
+    def _entry_row(self, title: str, text: str,
+                   changed: Callable[[str], None]) -> Adw.EntryRow:
+        row = Adw.EntryRow(title=title, text=text)
+        row.connect("changed", lambda r: not self._updating and changed(r.get_text()))
+        self._handlers[row] = Handler(select=lambda: self._type_into(row))
+        return row
+
+    def _type_into(self, row: Adw.EntryRow) -> None:
+        """A on a text field: put the caret in it and the keyboard up."""
+        row.grab_focus()
+        if row.get_ancestor(Adw.Dialog) is None:
+            self._editing = row
+        if self.link.connected and self._pad_held:
+            self.link.send({"op": "keyboard"})
+
+    def _regenerate_steam(self) -> None:
+        _regenerate(self)
+
+    def _steam_page(self) -> Adw.PreferencesPage:
+        page = Adw.PreferencesPage()
+        group = Adw.PreferencesGroup(
+            title="Steam library",
+            description="Which installed apps go into your frontend.")
+        try:
+            apps = model.steam_apps()
+        except OSError:
+            apps = []
+        ignore = self.session.ignore()
+        if not apps:
+            group.add(Adw.ActionRow(title="No Steam library found"))
+        else:
+            update = Adw.ButtonRow(title="Update the frontend now")
+            update.connect("activated", lambda _r: self._regenerate_steam())
+            group.add(update)
+        for app, reason in apps:
+            shown_by_default = reason is None
+            shown = (not ignore[app.appid]) if app.appid in ignore else shown_by_default
+            row = Adw.SwitchRow(title=GLib.markup_escape_text(app.name),
+                                subtitle=f"Hidden by default: {reason}" if reason
+                                else f"App {app.appid}", active=shown)
+
+            def toggled(r, *_a, appid=app.appid, default=shown_by_default):
+                if self._updating:
+                    return
+                show = r.get_active()
+                self.session.set_hidden(appid, None if show == default else not show)
+                self.changed()
+
+            row.connect("notify::active", toggled)
+
+            def reset(r=row, appid=app.appid, default=shown_by_default):
+                self.session.set_hidden(appid, None)
+                self._quietly(lambda: r.set_active(default))
+                self.changed()
+
+            self._handlers[row] = Handler(
+                select=lambda r=row: r.set_active(not r.get_active()),
+                adjust=lambda d, r=row: (r.set_active(d > 0), True)[1],
+                reset=reset)
+            group.add(row)
+        page.add(group)
+        return page
+
+
+# -- helpers ----------------------------------------------------------------
+def _regenerate(window: "Window") -> None:
+    if window.session.dirty:
+        window.toast("Apply first, so the list you see is the list it writes")
+        return
+    try:
+        subprocess.Popen([sys.executable, "-m", "padmode", "metadata", "steam"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    except OSError as exc:
+        window.toast(f"Could not run it: {exc}")
+        return
+    window.toast("Writing the Steam collection…")
+
+
+
+def _drop_handler(drop: Gtk.DropDown) -> Handler:
+    """Left and right walk a drop-down's choices, so the pad never has to open
+    its popover -- popovers are where pad navigation goes to get lost."""
+    def adjust(delta):
+        count = drop.get_model().get_n_items()
+        drop.set_selected((drop.get_selected() + delta) % count)
+        return True
+
+    return Handler(select=lambda: adjust(1), adjust=adjust)
+
+
+
+def _find(widget: Gtk.Widget | None, cls: type) -> Gtk.Widget | None:
+    if widget is None:
+        return None
+    if isinstance(widget, cls):
+        return widget
+    child = widget.get_first_child()
+    while child is not None:
+        found = _find(child, cls)
+        if found is not None:
+            return found
+        child = child.get_next_sibling()
+    return None
+
+
+def _rows(widget: Gtk.Widget) -> list[Gtk.Widget]:
+    out = []
+    child = widget.get_first_child()
+    while child is not None:
+        if isinstance(child, Adw.PreferencesRow):
+            out.append(child)
+        out.extend(_rows(child))
+        child = child.get_next_sibling()
+    return out
+
+
+def _row_of(widget: Gtk.Widget | None) -> Adw.PreferencesRow | None:
+    """The outermost row ``widget`` is in -- an expander's own row, not the
+    rows nested inside it, unless focus is already on one of those."""
+    if widget is None:
+        return None
+    if isinstance(widget, Adw.PreferencesRow):
+        return widget
+    return widget.get_ancestor(Adw.PreferencesRow)
+
+
+def _usable(row: Gtk.Widget) -> bool:
+    return row.get_mapped() and row.is_sensitive() and row.get_focusable()
+
+
+def _dialog_stops(widget: Gtk.Widget) -> list[Gtk.Widget]:
+    """A dialog's text rows, drop-downs and buttons, in the order shown."""
+    out = []
+    child = widget.get_first_child()
+    while child is not None:
+        if isinstance(child, (Adw.EntryRow, Gtk.DropDown, Gtk.Button)):
+            if child.get_mapped() and child.is_sensitive():
+                out.append(child)
+        else:
+            out.extend(_dialog_stops(child))
+        child = child.get_next_sibling()
+    return out
+
+
+def _focusables(row: Gtk.Widget) -> list[Gtk.Widget]:
+    """Buttons and switches inside a row, in order. Not nested rows."""
+    out = []
+    child = row.get_first_child()
+    while child is not None:
+        if isinstance(child, Adw.PreferencesRow):
+            pass
+        elif isinstance(child, (Gtk.Button, Gtk.Switch)) and child.get_mapped():
+            out.append(child)
+        else:
+            out.extend(_focusables(child))
+        child = child.get_next_sibling()
+    return out
+
+
+def _row_index(focus: Gtk.Widget | None) -> int | None:
+    row = focus if isinstance(focus, Adw.PreferencesRow) else (
+        focus.get_ancestor(Adw.PreferencesRow) if focus is not None else None)
+    if row is None:
+        return None
+    page = row.get_ancestor(Adw.PreferencesPage)
+    rows = _rows(page) if page is not None else []
+    return rows.index(row) if row in rows else None
+
+
+def _refocus(page: Gtk.Widget, index: int | None) -> bool:
+    rows = _rows(page)
+    if rows:
+        rows[min(index or 0, len(rows) - 1)].grab_focus()
+    return False
+
+
+def _digit_order(value) -> int:
+    return {"enter": 10, "backspace": 11, "clear": 12}.get(value, (
+        int(value) - 1) % 10 if str(value).isdigit() else 13)
+
+
+def _restart_daemon() -> None:
+    subprocess.Popen(["systemctl", "--user", "restart", "padmode.service"],
+                     stdin=subprocess.DEVNULL)
+
+
+# -- entry point ------------------------------------------------------------
+class App(Adw.Application):
+    def __init__(self, args: argparse.Namespace) -> None:
+        super().__init__(application_id=APP_ID)
+        self.args = args
+        self.window: Window | None = None
+
+    def do_activate(self) -> None:
+        if self.window is not None:
+            self.window.present()
+            return
+        Adw.Application.do_activate(self)
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        try:
+            session = model.Session(self.args.config)
+        except model.EditError as exc:
+            dialog = Adw.AlertDialog(
+                heading="The config file can't be edited here",
+                body=f"{exc}. Edit it by hand: {config.default_path()}")
+            dialog.add_response("ok", "Close")
+            win = Adw.ApplicationWindow(application=self)
+            win.present()
+            dialog.connect("response", lambda *_: self.quit())
+            dialog.present(win)
+            return
+        self.window = Window(self, session)
+        if self.args.page:
+            self.window.stack.set_visible_child_name(self.args.page)
+        self.window.present()
+        if self.args.screenshot:
+            GLib.timeout_add(int(self.args.screenshot_delay * 1000), self._shoot)
+
+    def _shoot(self) -> bool:
+        """Render the window to a PNG and quit. For checking the layout
+        without putting a window on anyone's screen (docs/development.md)."""
+        win = self.window
+        if self.args.focus_rows:
+            win.set_focus_visible(True)
+            for _ in range(self.args.focus_rows):
+                win.navigate("down")
+        GLib.timeout_add(300, lambda: self._save(win))
+        return False
+
+    def _save(self, win: Window) -> bool:
+        width, height = win.get_width(), win.get_height()
+        paintable = Gtk.WidgetPaintable.new(win)
+        snapshot = Gtk.Snapshot()
+        paintable.snapshot(snapshot, width, height)
+        node = snapshot.to_node()
+        if node is not None:
+            texture = win.get_native().get_renderer().render_texture(node, None)
+            texture.save_to_png(self.args.screenshot)
+            print(f"saved {self.args.screenshot} ({width}x{height})")
+        self.quit()
+        return False
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="padmode settings")
+    parser.add_argument("-c", "--config", type=lambda p: __import__("pathlib").Path(p))
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--page", choices=["buttons", "feel", "apps", "steam"])
+    parser.add_argument("--screenshot", help=argparse.SUPPRESS)
+    parser.add_argument("--focus-rows", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--screenshot-delay", type=float, default=1.5,
+                        help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+                        format="%(levelname)s %(name)s: %(message)s")
+    app = App(args)
+    return app.run([sys.argv[0]])

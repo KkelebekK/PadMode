@@ -40,7 +40,7 @@ def code(name: str) -> int:
 
 
 # -- the socket -------------------------------------------------------------
-class SocketTest(unittest.TestCase):
+class _SocketBase(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.path = Path(self.dir.name) / "run" / "padmode.sock"
@@ -67,6 +67,9 @@ class SocketTest(unittest.TestCase):
             select.select([self.server.fileno()], [], [], 0.02)
         return out
 
+
+
+class SocketTest(_SocketBase):
     def test_only_the_owner_can_reach_it(self):
         mode = stat.S_IMODE(os.stat(self.path).st_mode)
         self.assertEqual(mode & 0o077, 0)
@@ -116,6 +119,46 @@ class SocketTest(unittest.TestCase):
     def test_nobody_listening(self):
         self.server.stop()
         self.assertIsNone(request({"op": "reload"}, self.path, timeout=0.2))
+
+
+class LinkTest(_SocketBase):
+    """The window's end, against the real server."""
+
+    def test_events_both_ways_and_the_daemon_going_away(self):
+        from padmode.settings.link import DaemonLink
+
+        link = DaemonLink(self.path)
+        self.assertTrue(link.connect())
+        self.assertTrue(link.send({"op": "hold"}))
+        client, message = self.poll(1)[0]
+        self.assertEqual(message, {"op": "hold"})
+        self.server.send(client, {"event": "held"})
+        self.server.send(client, {"event": "nav", "dir": "up"})
+        import select
+        select.select([link.fileno()], [], [], 1)
+        events = []
+        for _ in range(20):
+            events += link.read() or []
+            if len(events) == 2:
+                break
+            select.select([link.fileno()], [], [], 0.05)
+        self.assertEqual(events, [{"event": "held"}, {"event": "nav", "dir": "up"}])
+        self.server.stop()
+        select.select([link.fileno()], [], [], 1)
+        self.assertIsNone(link.read())
+        self.assertFalse(link.connected)
+        self.server = ControlServer(self.path)
+        self.server.start()
+
+    def test_no_daemon(self):
+        from padmode.settings.link import DaemonLink
+
+        self.server.stop()
+        link = DaemonLink(self.path)
+        self.assertFalse(link.connect())
+        self.assertIsNone(link.reload())
+        self.server = ControlServer(self.path)
+        self.server.start()
 
 
 # -- the decisions ----------------------------------------------------------

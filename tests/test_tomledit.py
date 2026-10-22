@@ -150,6 +150,14 @@ class RemoveTest(unittest.TestCase):
         self.assertEqual(doc.text, SAMPLE.replace(
             'START = ["notify-send", "hi"]  # a command\n', ""))
 
+    def test_an_emptied_section_goes_unless_it_has_a_comment(self):
+        doc = Document("[a]\nx = 1\n\n[b]\ny = 2\n")
+        doc.remove(["a"], "x")
+        self.assertEqual(doc.text, "[b]\ny = 2\n")
+        doc = Document("[a]\n# keep me\nx = 1\n")
+        doc.remove(["a"], "x")
+        self.assertEqual(doc.text, "[a]\n# keep me\n")
+
     def test_an_absent_key(self):
         doc = Document(SAMPLE)
         self.assertFalse(doc.remove(["bindings"], "LB"))
