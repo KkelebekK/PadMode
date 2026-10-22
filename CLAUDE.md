@@ -5,9 +5,8 @@ gamepad: media and volume control without leaving your game, a gamepad-as-mouse
 desktop mode, app overlays over a running game, and (opt-in) unlocking the
 screen with the pad.
 
-`padmode` is a provisional name — final name TBD. The repo directory is
-`WeHaveSteamMachineAtHome` (a joke); do not use "Steam Machine" or other Valve
-product names in the shipped tool, package, or docs.
+`padmode` is a provisional name — final name TBD. Do not use "Steam Machine"
+or other Valve product names in the shipped tool, package, or docs.
 
 **Status: v0.7.0** (Guide-hold media/volume/mic; uinput virtual
 mouse/keyboard; desktop mode with bindable stick directions; window backends
@@ -431,8 +430,7 @@ Learned the hard way; re-learning them is expensive.
    are cited by name from other documents and from the code.*
 
 8. **Steam publishes an inert twin of every pad you connect.**
-   With Steam running — the normal case here, and the joke the repo is named
-   for — connecting a controller also produces a uinput pad called
+   With Steam running — the normal case on a gaming desktop — connecting a controller also produces a uinput pad called
    `Microsoft X-Box 360 pad <n>`, with a real 360 pad's capabilities and a USB
    bus type. It never emits anything. Measured: the twin appears within a
    second of the pad (creating a synthetic pad reliably produced a second
@@ -525,10 +523,10 @@ its own thing — unlock (v0.7) probably is.
 
 ---
 
-## 8. Working on this machine
+## 8. Developing on your own desktop
 
-Developed on the maintainer's daily driver. The older setup this replaces has
-been removed, so nothing else competes for the gamepad any more.
+padmode is usually developed on the same machine it runs on, with a real pad
+and a real session.
 
 - **Install deliberately, never as a side effect of development.** Run from the
   repo (`python -m padmode`) while working on it. `install.sh` is a separate,
@@ -537,8 +535,6 @@ been removed, so nothing else competes for the gamepad any more.
   controller.** There is a keyboard fallback, but treat the `finally` that
   releases the grab (§4) as load-bearing, and never test grab changes without a
   way to kill the daemon from the keyboard.
-- Auto-lock at login is still configured (`lock-at-login.sh`) and is unrelated
-  to this project. Leave it alone.
 
 ## 9. Reference
 
