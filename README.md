@@ -14,9 +14,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="GPL-3.0"/>
+  <a href="https://github.com/KkelebekK/PadMode/releases/latest"><img src="https://img.shields.io/github/v/release/KkelebekK/PadMode" alt="Latest release"/></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/KkelebekK/PadMode" alt="License"/></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+"/>
-  <img src="https://img.shields.io/badge/version-0.7-green" alt="v0.7"/>
 </p>
 
 ## Features
