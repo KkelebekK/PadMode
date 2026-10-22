@@ -453,13 +453,12 @@ instead of failing silently.
 
 ## Known limitations
 
-- **The settings window's text fields with the pad are untried.** Selecting
-  one puts the on-screen keyboard up over the window; that path is built and
-  wired, but has not been typed through end to end yet. Mouse and keyboard
-  work.
-- **The settings window may open behind other windows** when started from
-  Guide + R3, depending on the compositor's focus-stealing rules. It takes the
-  pad once it is in front.
+- **The settings window is tested on KDE Plasma only.** On a compositor with
+  stricter focus-stealing rules it may open behind other windows when started
+  from Guide + R3; it takes the pad once it is in front.
+- **PlayStation and Nintendo button labels are untried on real pads.** They
+  are matched by the buttons' positions; if yours look wrong, fix them with
+  *Button labels* on the General page.
 
 - **The game sees the modifier press, and never the release.** padmode reads
   without grabbing until the modifier goes down, so the press that *starts* the

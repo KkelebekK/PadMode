@@ -8,11 +8,11 @@ screen with the pad.
 `padmode` is a provisional name — final name TBD. Do not use "Steam Machine"
 or other Valve product names in the shipped tool, package, or docs.
 
-**Status: v0.7.0** (Guide-hold media/volume/mic; uinput virtual
+**Status: v0.8.0** (Guide-hold media/volume/mic; uinput virtual
 mouse/keyboard; desktop mode with bindable stick directions; window backends
 and overlay mode with return-to-game; frontend integration and the Heroic and
 Steam metadata generators; on-screen keyboard with auto-open; opt-in unlock
-with the pad; 669 tests). This document is the
+with the pad; a settings window driven by the pad; 772 tests). This document is the
 contract. If something here is wrong, fix this file in the same change as the
 code.
 
@@ -205,7 +205,7 @@ Core stays frontend-agnostic: nothing here knows what Pegasus is.
 | ~~**v0.5**~~ ✅ | On-screen keyboard, console style (`docs/on-screen-keyboard.md`) | **KDE Wayland only** — layer-shell, not window activation. X11 was dropped from this version: it needs override-redirect, which is different code, not a flag. The keyboard is therefore *narrower* than overlays, and the README says so |
 | ~~**v0.6**~~ ✅ | Steam metadata generator (`docs/metadata-generators.md`) | None |
 | ~~**v0.7**~~ ✅ | Unlock module, opt-in, off by default (`padmode/lock.py`, `padmode/unlock.py`, `docs/virtual-input.md`) | Screensaver D-Bus — **verified on KDE only**. The OSK is *not* the unlock UI: KWin hides it at the lock screen |
-| **v0.8** | Settings GUI: edit the config from a window, drivable with the pad — *built, not released* (`padmode/settings/`) | None — an ordinary window |
+| ~~**v0.8**~~ ✅ | Settings window: edit the config from a window, driven by the pad (`padmode/settings/`) | None — an ordinary window; themed and tested on KDE |
 
 Do not pull work earlier in this list. The point of the ordering is that v0.1
 and v0.2 are *universally useful on their own*.
