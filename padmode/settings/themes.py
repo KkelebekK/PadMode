@@ -181,8 +181,9 @@ def depth_css() -> str:
   background-color: var(--card-bg-color); border: none; margin-bottom: 6px;
   border-radius: var(--pm-radius);
   transition: transform 200ms {FLOAT_EASE}, box-shadow 200ms ease-out,
-              background-color 150ms ease-out;
+              background-color 150ms ease-out, opacity 250ms ease-out;
 }}
+.padmode-settings row.pm-enter {{ opacity: 0; transform: translateY(12px); }}
 .padmode-settings list.boxed-list > row:focus-within {{ margin-top: 2px; margin-bottom: 8px; }}
 """
 

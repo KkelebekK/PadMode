@@ -48,6 +48,10 @@ APP_ID = "io.github.KkelebekK.PadMode.Settings"
 #: How far one wheel click of the right stick scrolls a page, in pixels.
 SCROLL_STEP = 48
 
+#: Page slide, and the gap between rows appearing after it, in milliseconds.
+PAGE_SLIDE_MS = 300
+ROW_STAGGER_MS = 55
+
 #: How long the tab highlight takes to slide to a new tab, in milliseconds.
 #: Long enough for the squash and stretch to read (motion.py).
 TAB_SLIDE_MS = 380
@@ -151,7 +155,15 @@ class Window(Adw.ApplicationWindow):
         self._banner_do: Callable[[], None] | None = None
         view.add_top_bar(self.banner)
 
-        self.stack = Adw.ViewStack(hexpand=True)
+        # A Gtk.Stack, not libadwaita's: it can animate the change. Motion
+        # decided with the maintainer ("fluid"): pages slide along the rail's
+        # direction -- the next tab down comes up from below -- and their rows
+        # fade in one after another (_stagger).
+        self.stack = Gtk.Stack(hexpand=True, transition_duration=PAGE_SLIDE_MS,
+                               transition_type=Gtk.StackTransitionType.SLIDE_UP_DOWN)
+        self._quiet_pages = False   # rebuilding after an edit: no animation
+        self.stack.connect("notify::visible-child-name",
+                           lambda *_: self._quiet_pages or self._stagger())
         self.tabs = TabBar(self.stack)
         rail = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["pm-rail"])
         rail.append(self.tabs)
@@ -181,7 +193,7 @@ class Window(Adw.ApplicationWindow):
                         "steam": ("Steam", "applications-games-symbolic")}
         for name, build in self.pages:
             title, icon = self._titles[name]
-            self.stack.add_titled_with_icon(build(), name, title, icon)
+            self.stack.add_titled(build(), name, title)
             self.tabs.add(name, title, icon, self._tab_colours[name])
 
         self.connect("close-request", self._on_close_request)
@@ -552,19 +564,35 @@ class Window(Adw.ApplicationWindow):
         build = dict(self.pages)[name]
         title, icon = self._titles[name]
         visible = self.stack.get_visible_child_name() == name
+        # Rebuilt after an edit, not navigated to: no slide, no stagger.
+        self._quiet_pages = True
+        self.stack.set_transition_type(Gtk.StackTransitionType.NONE)
         self.stack.remove(old)
         page = build()
-        self.stack.add_titled_with_icon(page, name, title, icon)
-        # Keep the page order the user knows.
+        self.stack.add_titled(page, name, title)
+        # Keep the page order the user knows -- the slide's direction
+        # depends on it.
         names = [n for n, _ in self.pages]
         for n in names[names.index(name) + 1:]:
             child = self.stack.get_child_by_name(n)
             self.stack.remove(child)
-            t, i = self._titles[n]
-            self.stack.add_titled_with_icon(child, n, t, i)
+            self.stack.add_titled(child, n, self._titles[n][0])
         if visible:
             self.stack.set_visible_child_name(name)
             GLib.idle_add(lambda: _refocus(page, focus_index))
+        self.stack.set_transition_type(Gtk.StackTransitionType.SLIDE_UP_DOWN)
+        self._quiet_pages = False
+
+    def _stagger(self) -> None:
+        """The new page's rows appear one after another, rising a little."""
+        rows = [r for r in _rows(self.stack.get_visible_child())
+                if not isinstance(r.get_parent(), Gtk.ListBox) or
+                r.get_parent().get_ancestor(Adw.ExpanderRow) is None]
+        for row in rows:
+            row.add_css_class("pm-enter")
+        for k, row in enumerate(rows):
+            GLib.timeout_add(ROW_STAGGER_MS * (k + 1),
+                             lambda r=row: (r.remove_css_class("pm-enter"), False)[1])
 
     # -- rows ----------------------------------------------------------
     def _field_row(self, field: model.Field) -> Adw.PreferencesRow:
@@ -1151,7 +1179,7 @@ class TabBar(Gtk.Fixed):
     and keyboard all change the stack's visible page, so all three slide.
     """
 
-    def __init__(self, stack: Adw.ViewStack) -> None:
+    def __init__(self, stack: Gtk.Stack) -> None:
         super().__init__()
         self.add_css_class("pm-tabs")
         self._stack = stack

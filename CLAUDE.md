@@ -300,7 +300,10 @@ will not recolour. **Button labels follow the pad** (`settings/glyphs.py`):
 PlayStation's ✕ ○ △ □ and L1/R1, Nintendo's letters and ZL/ZR, Xbox's
 otherwise — told by the daemon when the window takes the pad, overridable in
 `[appearance] glyphs`. Matched by position; untried on real Sony and Nintendo
-pads. Motion and sound are still to be decided.
+pads. **Motion: fluid** — on top of the tab slide and the
+floating row, pages slide along the rail's direction (Gtk.Stack, 300 ms) and
+their rows rise into view one after another (55 ms apart, `pm-enter`); a
+rebuild after an edit does neither. Sound is still to be decided.
 
 How it is built, in order — each step usable and tested before the next:
 
