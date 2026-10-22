@@ -205,12 +205,12 @@ Core stays frontend-agnostic: nothing here knows what Pegasus is.
 | ~~**v0.5**~~ ✅ | On-screen keyboard, console style (`docs/on-screen-keyboard.md`) | **KDE Wayland only** — layer-shell, not window activation. X11 was dropped from this version: it needs override-redirect, which is different code, not a flag. The keyboard is therefore *narrower* than overlays, and the README says so |
 | ~~**v0.6**~~ ✅ | Steam metadata generator (`docs/metadata-generators.md`) | None |
 | ~~**v0.7**~~ ✅ | Unlock module, opt-in, off by default (`padmode/lock.py`, `padmode/unlock.py`, `docs/virtual-input.md`) | Screensaver D-Bus — **verified on KDE only**. The OSK is *not* the unlock UI: KWin hides it at the lock screen |
-| **v0.8** | Settings GUI: edit the config from a window, drivable with the pad | None — an ordinary window |
+| **v0.8** | Settings GUI: edit the config from a window, drivable with the pad — *built, not released* (`padmode/settings/`) | None — an ordinary window |
 
 Do not pull work earlier in this list. The point of the ordering is that v0.1
 and v0.2 are *universally useful on their own*.
 
-**v0.8, the settings GUI** (added 2026-09-23, not yet specified). Today every
+**v0.8, the settings GUI** (added 2026-09-23, specified and built 2026-10-22). Today every
 setting — bindings, overlays, the frontend, the Steam ignore list — means
 editing `config.toml` by hand. What is already decided elsewhere, so it is not
 re-derived:
@@ -300,11 +300,26 @@ How it is built, in order — each step usable and tested before the next:
    live test found that the reader slept while no pad was connected, so a
    reload with the controller off waited forever** — it now waits on watched
    descriptors instead of sleeping.
-3. The window (`python -m padmode.settings`, GTK4 like the keyboard, its own
-   process): pages, Apply, the unapplied-changes prompt, keyboard navigation.
-4. The four pages: bindings, feel, overlays and frontend, Steam ignore list.
-5. The `settings` action and its Guide + R3 default, the menu entry,
-   `install.sh`, docs — then a live run with the pad, and the release.
+3. ✅ The window (`python -m padmode.settings`, GTK 4 + libadwaita, its own
+   process): `model.py` holds every edit (stdlib, tested), `link.py` the
+   socket, `app.py` only draws and routes input through per-row handlers.
+   **Pad navigation is ours, not GTK's:** up/down go row to row, left/right
+   adjust or walk the row's own buttons. GTK's directional focus stepped into
+   a row's trash button on "down", and libadwaita's dialogs left focus on an
+   internal widget that directional focus could not leave — both measured.
+   B leaves a text field only if A entered it; a number's box holds text
+   focus too, and B on it closed nothing until that was told apart.
+4. ✅ The four pages: bindings (press-to-assign; the button's old job is
+   named, never dropped silently), feel, apps (overlays, frontend, timing),
+   Steam ignore list with a write-it-now button.
+5. ✅ The `settings` binding (R3 by default; gives way to `desktop.enter =
+   "R3"` so older configs still start), `padmode settings` (opens even on a
+   config the daemon refuses), the menu entry via `install.sh`, docs.
+   Checked end to end by `tools/settings_e2e.py`: a synthetic pad, the real
+   daemon, the window on broadway — assign, a number, reset, close-and-apply.
+   **Not yet tried:** typing into a text field through the OSK; a real pad;
+   KDE's focus-stealing rules when Guide + R3 starts the window. The release
+   waits for the maintainer.
 
 ---
 

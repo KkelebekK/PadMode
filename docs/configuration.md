@@ -19,6 +19,7 @@ trigger_threshold = 0.5   # how far LT/RT must be squeezed, on pads whose
 
 [bindings]
 # Bindings merge over the defaults, so you only write what you change.
+# Most of this is easier in the settings window (Guide + R3).
 B = "media.stop"           # add one
 RB = "audio.volume_up"     # change one
 Y = false                  # remove one

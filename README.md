@@ -32,6 +32,8 @@
 - **Library metadata** — generate Pegasus collections from Heroic and Steam,
   cover art included.
 - **Unlock with the pad** — type your password at the lock screen *(opt-in)*.
+- **Settings window** — rebind buttons, tune the feel and manage your apps,
+  all from the pad: Guide + R3.
 
 Not a distro and not a game frontend: padmode adds console behaviour to the
 system you already have, and stays out of the way the rest of the time.
@@ -47,6 +49,7 @@ Hold **Guide** and press:
 | X / Y | Mute output / mute microphone |
 | D-pad up / down | Volume |
 | L3 | Desktop mode |
+| R3 | Settings window |
 
 In desktop mode the left stick moves the pointer, the right stick scrolls,
 A / B / X click, **Y** opens the keyboard and **Guide** hands the pad back.
@@ -75,7 +78,8 @@ hand? `./install.sh --print-steps`. To remove: `./install.sh --uninstall`.
 
 Optional extras, each enabling one feature: `playerctl` and `wpctl` for media
 and volume, `kdotool` (KDE) or `xdotool` (X11) for overlays,
-`gtk4-layer-shell` for the on-screen keyboard.
+`gtk4-layer-shell` for the on-screen keyboard, `libadwaita` for the settings
+window.
 
 ## Compatibility
 
@@ -105,8 +109,10 @@ a real mouse and keyboard. The rest needs help from the desktop itself:
 
 ## Configuration
 
-Settings live in `~/.config/padmode/config.toml`, and you only write what you
-change:
+The easiest way is the settings window: **Guide + R3**, or *padmode settings*
+in your application menu. It edits `~/.config/padmode/config.toml` for you and
+keeps whatever you wrote in it by hand, comments included. Prefer the file?
+You only write what you change:
 
 ```toml
 [bindings]

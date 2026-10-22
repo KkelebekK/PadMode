@@ -279,6 +279,19 @@ def cmd_actions(args: argparse.Namespace, config: Config) -> int:
     return 0
 
 
+def cmd_settings(args: argparse.Namespace, config: Config) -> int:
+    # GTK is imported here and only here: never on the daemon's path (§2).
+    from .settings import unavailable_reason
+
+    reason = unavailable_reason()
+    if reason:
+        log.error("%s", reason)
+        return 1
+    from .settings.app import main as settings_main
+
+    return settings_main(["-c", str(args.config)] if args.config else [])
+
+
 def cmd_config(args: argparse.Namespace, config: Config) -> int:
     """Show the effective configuration after defaults and overrides merge."""
     path = args.config or default_path()
@@ -386,6 +399,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("config", help="show effective configuration").set_defaults(
         func=cmd_config
     )
+    sub.add_parser(
+        "settings", help="open the settings window (Guide + R3 does too)"
+    ).set_defaults(func=cmd_settings)
     _add_metadata_parser(sub)
     parser.set_defaults(func=cmd_run)
     return parser
@@ -456,6 +472,11 @@ def _add_metadata_parser(sub) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _setup_logging(args.verbose)
+    if args.func is cmd_settings:
+        # The window opens on a config the daemon refuses -- it is the easiest
+        # place to fix one -- so it reads the file itself, and says what is
+        # wrong instead of refusing to start.
+        return cmd_settings(args, Config())
     try:
         config = load(args.config)
     except ConfigError as exc:

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=padmode settings
+Comment=Buttons, feel and apps for gamepad console mode
+Exec=@PADMODE@ settings
+Icon=input-gaming
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=gamepad;controller;padmode;
+StartupNotify=true

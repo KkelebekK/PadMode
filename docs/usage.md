@@ -341,6 +341,51 @@ Steam yet — run it after installing or removing a game.
 
 Logs go to the journal: `journalctl --user -u padmode -f`
 
+## Settings window
+
+Hold **Guide** and press **R3**, choose *padmode settings* from your
+application menu, or run `padmode settings`. Four pages:
+
+- **Buttons** — what each Guide combo does, desktop mode's buttons, and the
+  unlock layout (stick dial or Xbox, one choice).
+- **Feel** — pointer and scroll speed, dead zone, curve, how far sticks and
+  triggers go before they count, the on-screen keyboard's size and repeat.
+- **Apps** — overlays, the frontend, and overlay timing.
+- **Steam** — which installed apps your frontend shows, and a button that
+  writes the collection.
+
+The pad drives it directly, like a console's settings menu:
+
+| Pad | Does |
+|---|---|
+| D-pad / left stick | Move between rows |
+| Left / right | Change the value, or move to the row's buttons |
+| A | Select — on a binding: press the button you want for it |
+| B | Back; at the top, close |
+| LB / RB | Previous / next page |
+| Start | Apply |
+| Y | Put the highlighted setting back to its default |
+| Right stick | Scroll |
+| Guide | Let go of the pad; the window stays open for the mouse |
+
+To rebind, select a row and press the button you want — a stick direction
+works too. If that button already did something, the window tells you what it
+no longer does. Mouse and keyboard work everywhere as well.
+
+**Nothing is saved until you press Apply**, and padmode picks the change up
+straight away. A few settings — which pad to use, the window backend, turning
+unlock on or off — only take effect after a restart; the window says so and
+offers to restart padmode. Closing with unapplied changes asks whether to
+apply them, discard them, or go back.
+
+The window edits your config file in place: what you wrote by hand, comments
+included, stays as it was. A setting put back to its default is removed from
+the file rather than written out. If the file is already broken, the window
+opens anyway and says what is wrong, so you can fix it there.
+
+The pad belongs to the window only while the window is active. Switch to a
+game and the game has it back.
+
 ## What works where
 
 Media keys and desktop mode need no window management at all, so they run
@@ -393,6 +438,14 @@ Missing optional tools disable only the bindings that need them. No
 instead of failing silently.
 
 ## Known limitations
+
+- **The settings window's text fields with the pad are untried.** Selecting
+  one puts the on-screen keyboard up over the window; that path is built and
+  wired, but has not been typed through end to end yet. Mouse and keyboard
+  work.
+- **The settings window may open behind other windows** when started from
+  Guide + R3, depending on the compositor's focus-stealing rules. It takes the
+  pad once it is in front.
 
 - **The game sees the modifier press, and never the release.** padmode reads
   without grabbing until the modifier goes down, so the press that *starts* the

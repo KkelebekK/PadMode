@@ -21,6 +21,20 @@ on a session you do not mind being typed into:
 PADMODE_INTEGRATION=1 python -m unittest discover -s tests -t .
 ```
 
+The settings window is checked end to end with no pad and no screen: a
+synthetic uinput pad, the real daemon, and the window on a broadway display,
+rendered in memory. Stop the service first, or it reads the synthetic pad too:
+
+```bash
+gtk4-broadwayd :5 &
+systemctl --user stop padmode.service
+python3 tools/settings_e2e.py assign   # also: feel, close
+systemctl --user start padmode.service
+```
+
+`python -m padmode.settings --screenshot out.png --page feel` renders one page
+to a PNG the same way, for checking a layout change.
+
 See [CLAUDE.md](../CLAUDE.md) for the design contract and the reasoning behind the
 locked decisions.
 
@@ -35,7 +49,7 @@ locked decisions.
 | ✅ **v0.5** | On-screen keyboard you drive with the pad, like a console | KDE Wayland only |
 | ✅ v0.6 | Steam metadata generator | No |
 | ✅ **v0.7** | Unlocking the screen with the pad (opt-in, off by default) | Screensaver D-Bus |
-| v0.8 | Settings GUI — change the config from a window, with the pad | No |
+| v0.8 | Settings window — change the config from the pad *(built, not released)* | No |
 
 v0.1 and v0.2 are deliberately useful on their own, on any desktop. Overlays
 are the first feature that has to activate a window, which is where Wayland

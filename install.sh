@@ -20,6 +20,8 @@ UNIT="$UNIT_DIR/padmode.service"
 HEROIC_PATH_UNIT="$UNIT_DIR/padmode-heroic.path"
 HEROIC_SERVICE_UNIT="$UNIT_DIR/padmode-heroic.service"
 UDEV_RULE="/etc/udev/rules.d/99-padmode.rules"
+APPS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+DESKTOP_FILE="$APPS_DIR/io.github.KkelebekK.PadMode.Settings.desktop"
 MIN_PYTHON="3.11"
 
 # Heroic keeps its library cache in one of two places, depending on whether it
@@ -95,6 +97,9 @@ EOF
     command -v gdbus >/dev/null || warn \
         "optional: 'gdbus' not found -- unlock with the pad will be disabled"
 
+    python3 -c 'import gi; gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1"); from gi.repository import Adw' 2>/dev/null || warn \
+        "optional: GTK 4 + libadwaita (python-gobject, libadwaita) not found -- the settings window will not open"
+
     if ! command -v kdotool >/dev/null && ! command -v xdotool >/dev/null; then
         warn "optional: no window tool found (kdotool on KDE Wayland, xdotool"
         warn "  on X11) -- app overlays will be disabled. Nothing else changes."
@@ -117,6 +122,9 @@ $(bold "Manual installation")
    exec python3 -m padmode "\$@"
    LAUNCHER
    chmod +x "$BIN"
+
+   mkdir -p "$APPS_DIR"
+   sed "s|@PADMODE@|$BIN|" packaging/io.github.KkelebekK.PadMode.Settings.desktop.in > "$DESKTOP_FILE"
 
    (A launcher rather than pip: most distros now ship a PEP 668
    externally-managed Python where 'pip install --user' refuses to run.
@@ -180,6 +188,13 @@ exec python3 -m padmode "\$@"
 EOF
     chmod +x "$BIN"
     echo "   installed launcher: $BIN"
+
+    # The settings window's menu entry. Harmless without GTK: the window
+    # says what it needs and exits.
+    mkdir -p "$APPS_DIR"
+    sed "s|@PADMODE@|$BIN|" \
+        "$SRC_DIR/packaging/io.github.KkelebekK.PadMode.Settings.desktop.in" > "$DESKTOP_FILE"
+    echo "   menu entry: $DESKTOP_FILE"
 
     case ":$PATH:" in
         *":$BIN_DIR:"*) ;;
@@ -262,7 +277,7 @@ uninstall() {
     bold "Uninstalling padmode"
     systemctl --user disable --now padmode.service 2>/dev/null || true
     systemctl --user disable --now padmode-heroic.path 2>/dev/null || true
-    rm -f "$UNIT" "$BIN" "$HEROIC_PATH_UNIT" "$HEROIC_SERVICE_UNIT"
+    rm -f "$UNIT" "$BIN" "$HEROIC_PATH_UNIT" "$HEROIC_SERVICE_UNIT" "$DESKTOP_FILE"
     rm -rf "${LIB_DIR:?}/padmode"
     systemctl --user daemon-reload 2>/dev/null || true
     echo "removed the service, launcher and package"
