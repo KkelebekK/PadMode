@@ -35,6 +35,7 @@ def _on_sigterm(_signum: int, _frame) -> None:
 
 
 def cmd_run(args: argparse.Namespace, config: Config) -> int:
+    from .control import ControlServer
     from .input import DigitKeypad, GamepadReader, VirtualInput
     from .lock import LockWatcher
     from .unlock import KEYPAD_KEYS
@@ -63,9 +64,13 @@ def cmd_run(args: argparse.Namespace, config: Config) -> int:
     # feature should not leave a gdbus process behind it.
     lock = LockWatcher() if config.unlock.enabled else None
     keypad = DigitKeypad(KEYPAD_KEYS) if config.unlock.enabled else None
+    # Always: Apply in the settings window needs it whether or not the window
+    # ever takes the pad, and it costs one socket.
+    control = ControlServer()
     try:
         Daemon(
-            config, reader, runner, virtual, detection.backend, osk, lock, keypad
+            config, reader, runner, virtual, detection.backend, osk, lock, keypad,
+            control=control, config_path=args.config,
         ).run()
     except KeyboardInterrupt:
         pass

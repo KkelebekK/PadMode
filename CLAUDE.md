@@ -286,11 +286,20 @@ How it is built, in order — each step usable and tested before the next:
    `config.write` is the only door to the disk: `check_text` (the daemon's
    parse and the Steam ignore list), then an atomic rename keeping the file's
    mode.
-2. A control socket on the daemon (`$XDG_RUNTIME_DIR/padmode.sock`, line JSON
-   like the keyboard's pipe): `reload` for Apply, `capture` for
-   press-to-assign, and the `SETTINGS` mode — taking the pad, sending
-   navigation steps, letting go. A reload that fails keeps the old config and
-   says why.
+2. ✅ A control socket on the daemon (`padmode/control.py`,
+   `$XDG_RUNTIME_DIR/padmode.sock`, line JSON like the keyboard's pipe):
+   `reload` for Apply, `capture` for press-to-assign, `hold`/`release` for
+   `Mode.SETTINGS`, `keyboard` for a text field. One epoll descriptor for the
+   listener and every client, watched by the reader beside the pad. Mode 0600,
+   and `SO_PEERCRED` checked besides. A reload that fails keeps the old config
+   and says why; settings read only at startup (the pad, the window backend,
+   unlock on/off, whether desktop mode's devices exist) come back as
+   `restart`. Locking the screen takes the pad from the window like from any
+   mode. Measured live: reload 0.6 ms; the first hold ~200 ms (it creates the
+   virtual devices the keyboard will type with), later ones immediate. **The
+   live test found that the reader slept while no pad was connected, so a
+   reload with the controller off waited forever** — it now waits on watched
+   descriptors instead of sleeping.
 3. The window (`python -m padmode.settings`, GTK4 like the keyboard, its own
    process): pages, Apply, the unapplied-changes prompt, keyboard navigation.
 4. The four pages: bindings, feel, overlays and frontend, Steam ignore list.

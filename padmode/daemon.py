@@ -33,7 +33,10 @@ from .config import (
     is_osk,
     overlay_name,
 )
-from . import unlock
+from . import config as config_module
+from . import control, unlock
+from .actions.builtin import ActionContext
+from .config import ConfigError
 from .osk import protocol as osk_protocol
 
 log = logging.getLogger(__name__)
@@ -127,10 +130,17 @@ class Mode(enum.Enum):
     #: :func:`lock_changed`. Grabbed throughout, so a game still running
     #: behind the lock screen does not see the password being dialled.
     UNLOCK = "unlock"
+    #: The settings window (v0.8) has the pad. Like OSK, the daemon digests
+    #: the pad into navigation steps and sends them on, here over the control
+    #: socket rather than a pipe. Entered only at the window's request.
+    SETTINGS = "settings"
 
 
 #: Modes in which we hold the pad exclusively and the tick runs.
-PAD_MODES = (Mode.DESKTOP, Mode.OVERLAY, Mode.OSK)
+PAD_MODES = (Mode.DESKTOP, Mode.OVERLAY, Mode.OSK, Mode.SETTINGS)
+
+#: Modes whose left stick and d-pad step a focus rather than move a pointer.
+NAV_MODES = (Mode.OSK, Mode.SETTINGS)
 
 #: Of those, the ones where the sticks drive the virtual pointer. The keyboard
 #: takes both sticks -- the left one navigates the grid, the right one slides
@@ -166,6 +176,17 @@ class OskOp:
     grid and decides what they mean.
     """
 
+    kind: str
+    value: str = ""
+
+
+@dataclass(frozen=True)
+class SettingsOp:
+    """Something to tell the settings window. Sent as a control event."""
+
+    #: ``nav`` (``value`` a direction), ``act`` (an action from
+    #: :data:`padmode.control.SETTINGS_BUTTONS`), ``captured`` (an input
+    #: name) or ``cancelled``.
     kind: str
     value: str = ""
 
@@ -240,6 +261,14 @@ class State:
     #: The digit dial's memory while in :data:`Mode.UNLOCK`. Fresh on every
     #: lock, so nothing half-typed survives from the last one.
     unlock: unlock.UnlockState = field(default_factory=unlock.UnlockState)
+    #: The settings window asked for the next input to be reported, not used.
+    capture: bool = False
+    #: Sticks being aimed during a capture, the dial's way: a direction is
+    #: what the stick pointed at when it came home.
+    capture_aim: dict[str, unlock.StickAim] = field(default_factory=dict)
+    #: Wheel clicks owed to the settings window's scroll, carried between
+    #: ticks so a gentle push still scrolls.
+    settings_scroll: float = 0.0
 
     def reset_inputs(self) -> None:
         """Forget transient input state when entering or leaving a mode."""
@@ -250,6 +279,8 @@ class State:
         self.axis_rebound.clear()
         self.pending_release.clear()
         self.osk_nav = None
+        self.capture_aim.clear()
+        self.settings_scroll = 0.0
 
 
 @dataclass(frozen=True)
@@ -274,6 +305,8 @@ class Decision:
     #: Key codes to tap on the unlock keypad, in order. Only ever set in
     #: :data:`Mode.UNLOCK`.
     keypad: tuple[int, ...] = ()
+    #: Things to tell the settings window, in order.
+    settings: tuple[SettingsOp, ...] = ()
 
     def __bool__(self) -> bool:
         return bool(
@@ -285,6 +318,7 @@ class Decision:
             or self.frontend
             or self.osk
             or self.keypad
+            or self.settings
         )
 
 
@@ -336,6 +370,8 @@ def decide(
             state.axis_ranges, now,
         )
         return Decision(keypad=keys) if keys else NOTHING
+    if state.mode is Mode.SETTINGS:
+        return _decide_settings(ev_type, ev_code, ev_value, state, config, now)
     if state.mode is Mode.OSK:
         return _decide_osk(ev_type, ev_code, ev_value, state, config, now)
     if state.mode in POINTER_MODES:
@@ -643,6 +679,140 @@ def _decide_osk(
     return NOTHING
 
 
+def _decide_settings(
+    ev_type: int,
+    ev_code: int,
+    ev_value: int,
+    state: State,
+    config: Config,
+    now: float,
+) -> Decision:
+    """Route one event while the settings window has the pad.
+
+    The keyboard's grid, nearly: the d-pad and the left stick step a focus,
+    with the same repeat clock, and the face buttons are fixed actions
+    (:data:`padmode.control.SETTINGS_BUTTONS`). Guide lets go -- the one exit
+    that must never need thinking about, as everywhere.
+
+    A capture is the exception to all of it: the next input is the answer to
+    "which button?", so nothing it would normally do happens. Guide cancels a
+    capture instead of leaving, because Guide is the modifier and can never be
+    the answer.
+    """
+    guide = buttons.code_of(config.modifier)
+    if state.capture:
+        return _decide_capture(ev_type, ev_code, ev_value, state, config, now,
+                               guide)
+
+    if ev_type == buttons.EV_KEY and ev_value == 1 and ev_code == guide:
+        state.mode = Mode.IDLE
+        state.reset_inputs()
+        return Decision(grab=Grab.RELEASE, mode=Mode.IDLE)
+
+    if ev_type == buttons.EV_ABS:
+        if ev_code in (buttons.ABS_HAT0X, buttons.ABS_HAT0Y):
+            if ev_value == 0:
+                if state.osk_nav is not None and state.osk_nav.source == ev_code:
+                    state.osk_nav = None
+                return NOTHING
+            direction = _OSK_STEPS.get(buttons.resolve(ev_type, ev_code, ev_value)
+                                       or "")
+            if direction is None:
+                return NOTHING
+            state.osk_nav = OskNav(direction, now + config.osk.repeat_delay,
+                                   ev_code)
+            return Decision(settings=(SettingsOp("nav", direction),))
+        if buttons.stick_axis(ev_code) is not None:
+            lo, hi = state.axis_ranges.get(ev_code, buttons.DEFAULT_AXIS_RANGE)
+            state.sticks[ev_code] = buttons.normalize_axis(ev_value, lo, hi)
+            if ev_code in OSK_STICK_AXES:
+                ops = _as_settings(osk_nav_ops(state, config, now))
+                return Decision(settings=ops) if ops else NOTHING
+        return NOTHING
+
+    if ev_type == buttons.EV_KEY and ev_value == 1:
+        action = control.SETTINGS_BUTTONS.get(_button_name(ev_code) or "")
+        if action is not None:
+            return Decision(settings=(SettingsOp("act", action),))
+    return NOTHING
+
+
+def _decide_capture(
+    ev_type: int,
+    ev_code: int,
+    ev_value: int,
+    state: State,
+    config: Config,
+    now: float,
+    guide: int | None,
+) -> Decision:
+    if ev_type == buttons.EV_KEY and ev_value == 1:
+        if ev_code == guide:
+            state.capture = False
+            state.capture_aim.clear()
+            return Decision(settings=(SettingsOp("cancelled"),))
+        name = _button_name(ev_code)
+        if name is None:
+            return NOTHING
+        return _captured(state, name)
+    if ev_type == buttons.EV_ABS:
+        if ev_code in (buttons.ABS_HAT0X, buttons.ABS_HAT0Y):
+            name = buttons.resolve(ev_type, ev_code, ev_value)
+            return _captured(state, name) if name else NOTHING
+        stick = unlock.stick_of(ev_code)
+        if stick is not None:
+            lo, hi = state.axis_ranges.get(ev_code, buttons.DEFAULT_AXIS_RANGE)
+            aim = state.capture_aim.setdefault(stick, unlock.StickAim())
+            value = buttons.normalize_axis(ev_value, lo, hi)
+            if ev_code in (buttons.ABS_X, buttons.ABS_RX):
+                aim.x = value
+            else:
+                aim.y = value
+            aim.dirty = True
+        return NOTHING
+    if ev_type == buttons.EV_SYN:
+        # Read per frame, as the dial does: between the two axis events of
+        # one movement the stick is somewhere it never was.
+        for stick, aim in state.capture_aim.items():
+            if not aim.dirty:
+                continue
+            aim.dirty = False
+            sector = unlock.track(aim, config.desktop.stick_threshold,
+                                  config.desktop.stick_settle, now)
+            if sector is not None:
+                return _captured(state, unlock.sector_name(stick, sector))
+    return NOTHING
+
+
+def _captured(state: State, name: str) -> Decision:
+    state.capture = False
+    state.capture_aim.clear()
+    # The answer must not also act once capture ends: a stick still out, a
+    # d-pad still held.
+    state.reset_inputs()
+    return Decision(settings=(SettingsOp("captured", name),))
+
+
+def _as_settings(ops: tuple[OskOp, ...]) -> tuple[SettingsOp, ...]:
+    return tuple(SettingsOp("nav", op.value) for op in ops if op.kind == "step")
+
+
+def settings_scroll_steps(state: State, config: Config, dt: float) -> int:
+    """Whole wheel clicks the right stick owes the settings window this tick.
+
+    Vertical only, at ``desktop.scroll_speed`` -- the same feel as scrolling in
+    desktop mode, so a list scrolls the way a web page does.
+    """
+    y = state.sticks.get(buttons.ABS_RY, 0.0)
+    if abs(y) < config.desktop.dead_zone:
+        state.settings_scroll = 0.0
+        return 0
+    state.settings_scroll += y * config.desktop.scroll_speed * dt
+    whole = int(state.settings_scroll)
+    state.settings_scroll -= whole
+    return whole
+
+
 def osk_stick_direction(state: State, config: Config) -> str | None:
     """Which of the four ways the left stick points now, or None near centre.
 
@@ -706,7 +876,7 @@ def osk_nav_ops(state: State, config: Config, now: float) -> tuple[OskOp, ...]:
     compositor's autorepeat; here the steps go to our own renderer, so the rate
     is ours to choose and ours to stop.
     """
-    if state.mode is not Mode.OSK:
+    if state.mode not in NAV_MODES:
         state.osk_nav = None
         return ()
 
@@ -1010,7 +1180,7 @@ class Daemon:
 
     def __init__(
         self, config: Config, reader, runner, virtual=None, windows=None, osk=None,
-        lock=None, keypad=None,
+        lock=None, keypad=None, control=None, config_path=None,
     ) -> None:
         self._config = config
         self._reader = reader
@@ -1031,6 +1201,13 @@ class Daemon:
         #: The unlock keypad (:class:`~padmode.input.DigitKeypad`), open only
         #: while the screen is locked.
         self._keypad = keypad
+        #: The control socket (:class:`~padmode.control.ControlServer`), or
+        #: None when this daemon has none -- the tests, mostly.
+        self._control = control
+        #: Where the config came from, so Apply can read it again.
+        self._config_path = config_path
+        #: The connection whose window has the pad, while one does.
+        self._settings_client: int | None = None
         #: Whether the keyboard now on screen opened itself. Only an automatic
         #: opening closes automatically: one you asked for stays until you
         #: dismiss it, because having it vanish under you would be worse than
@@ -1101,6 +1278,7 @@ class Daemon:
         })
         self._preflight_overlays()
         self._start_lock()
+        self._start_control()
         log.info(
             "ready -- hold %s and press a bound button (%d bindings)",
             self._config.modifier,
@@ -1112,6 +1290,7 @@ class Daemon:
                     self._tick()
                 elif item == WAKE:
                     self._pump_lock()
+                    self._pump_control()
                 else:
                     self._handle(*item)
         finally:
@@ -1120,6 +1299,8 @@ class Daemon:
                 self._lock.stop()
             if self._keypad is not None:
                 self._keypad.close()
+            if self._control is not None:
+                self._control.stop()
             # Before the deferred return below, for the same reason _leave does
             # it: nothing of ours on screen while windows are being activated.
             self._stop_osk()
@@ -1179,6 +1360,157 @@ class Daemon:
             self._keypad.close()
         self._reader.ungrab()
 
+    # -- the control socket and the settings window ---------------------
+    def _start_control(self) -> None:
+        if self._control is None or not self._control.start():
+            return
+        fd = self._control.fileno()
+        if fd is not None:
+            self._reader.watch(fd)
+
+    def _pump_control(self) -> None:
+        if self._control is None:
+            return
+        for client, message in self._control.poll():
+            op = message.get("op")
+            if op == "reload":
+                self._control.send(client, {"reply": "reload", **self._reload()})
+            elif op == "hold":
+                self._hold_for_settings(client)
+            elif op == "release":
+                if client == self._settings_client:
+                    self._end_settings()
+            elif op == "capture":
+                self._capture(client, bool(message.get("cancel")))
+            elif op == "keyboard":
+                if client == self._settings_client and (
+                    self._state.mode is Mode.SETTINGS
+                ):
+                    self._open_osk()
+            elif op == control.CLOSED["op"]:
+                if client == self._settings_client:
+                    # The window went away holding the pad: the keyboard's
+                    # liveness rule, over a socket. EOF is the whole signal.
+                    self._end_settings()
+                    self._settings_client = None
+
+    def _hold_for_settings(self, client: int) -> None:
+        mode = self._state.mode
+        if mode is Mode.UNLOCK:
+            self._control.send(client, {"event": "refused",
+                                        "reason": "the screen is locked"})
+            return
+        if self._settings_mode() and client != self._settings_client:
+            self._send_event({"event": "released"})  # a newer window wins
+        self._settings_client = client
+        if self._settings_mode():
+            self._control.send(client, {"event": "held"})
+            return
+        if mode is Mode.OSK:
+            self._close_osk()
+            mode = self._state.mode
+        if mode in POINTER_MODES:
+            # Already grabbed and ticking. An overlay's way back to the game
+            # is given up: the window is where the user went instead.
+            if self._virtual is not None:
+                self._virtual.release_all()
+        else:
+            # From IDLE or with Guide held: everything entering desktop mode
+            # sets up, because the keyboard may be asked for over a text field.
+            if self._virtual is not None:
+                self._virtual.open()
+            self._reader.set_tick(TICK_INTERVAL)
+            self._prewarm_osk()
+            self._reader.grab()
+        self._state.mode = Mode.SETTINGS
+        self._state.reset_inputs()
+        self._state.capture = False
+        log.info("the settings window has the pad -- %s lets go",
+                 self._config.modifier)
+        self._control.send(client, {"event": "held"})
+
+    def _settings_mode(self) -> bool:
+        """The window has the pad -- directly, or under a keyboard it opened."""
+        mode = self._state.mode
+        return mode is Mode.SETTINGS or (
+            mode is Mode.OSK and self._state.osk_return is Mode.SETTINGS
+        )
+
+    def _end_settings(self) -> None:
+        if not self._settings_mode():
+            return
+        self._state.mode = Mode.IDLE
+        self._state.reset_inputs()
+        self._leave(Mode.SETTINGS)
+        self._reader.ungrab()
+
+    def _capture(self, client: int, cancel: bool) -> None:
+        if client != self._settings_client or self._state.mode is not Mode.SETTINGS:
+            return
+        if cancel:
+            if self._state.capture:
+                self._state.capture = False
+                self._state.capture_aim.clear()
+                self._send_event({"event": "cancelled"})
+            return
+        self._state.reset_inputs()
+        self._state.capture = True
+
+    def _send_settings(self, op: SettingsOp) -> None:
+        if op.kind == "nav":
+            self._send_event({"event": "nav", "dir": op.value})
+        elif op.kind == "act":
+            self._send_event({"event": "act", "action": op.value})
+        elif op.kind == "captured":
+            self._send_event({"event": "captured", "input": op.value})
+        elif op.kind == "cancelled":
+            self._send_event({"event": "cancelled"})
+
+    def _send_event(self, message: dict) -> None:
+        if self._control is not None and self._settings_client is not None:
+            self._control.send(self._settings_client, message)
+
+    def _reload(self) -> dict:
+        """Read the config file again and use it. Apply, from the window.
+
+        Most of the config is read where it is used, so swapping it is enough.
+        What is not -- the pad chosen at startup, the window backend, whether
+        unlock is watching, whether desktop mode's devices exist -- is reported
+        as needing a restart rather than half-applied.
+        """
+        try:
+            new = config_module.load(self._config_path)
+        except ConfigError as exc:
+            log.warning("reload refused, keeping the old config: %s", exc)
+            return {"ok": False, "error": str(exc), "restart": []}
+        old = self._config
+        restart = []
+        if (new.device_name, new.device_path) != (old.device_name, old.device_path):
+            restart.append("device")
+        if new.windows.backend != old.windows.backend:
+            restart.append("windows.backend")
+        if new.unlock.enabled != old.unlock.enabled:
+            restart.append("unlock.enabled")
+        if self._virtual is None and (new.desktop.enabled or new.overlays) and not (
+            old.desktop.enabled or old.overlays
+        ):
+            restart.append("desktop.enabled")
+        if self._osk is None and new.osk.enabled and not old.osk.enabled:
+            restart.append("osk.enabled")
+        self._config = new
+        if new.volume_step != old.volume_step:
+            self._runner.set_context(ActionContext(volume_step=new.volume_step))
+        if self._osk is not None and new.osk != old.osk:
+            self._osk.reconfigure(new.osk, keep_running=self._state.mode is Mode.OSK)
+        if new.bindings != old.bindings:
+            self._runner.preflight({
+                name: binding for name, binding in new.bindings.items()
+                if overlay_name(binding) is None and not is_frontend(binding)
+            })
+        log.info("config reloaded%s",
+                 f" ({', '.join(restart)} need a restart)" if restart else "")
+        return {"ok": True, "error": None, "restart": restart}
+
     def _handle(self, ev_type: int, ev_code: int, ev_value: int) -> None:
         self._state.axis_ranges = self._reader.axis_ranges
         self._state.trigger_axes = self._reader.trigger_axes
@@ -1230,12 +1562,24 @@ class Daemon:
         if self._keypad is not None:
             for code in decision.keypad:
                 self._keypad.tap(code)
+        for settings_op in decision.settings:
+            self._send_settings(settings_op)
 
     def _tick(self) -> None:
         now = time.monotonic()
         # Window work first, and outside the mode check: a return-to-game is
         # deliberately outstanding *after* we have left overlay mode.
         self._pump_windows(now)
+        if self._state.mode is Mode.SETTINGS:
+            # Steps and their repeats, and the right stick's scroll. Nothing
+            # else: there is no pointer in this mode.
+            self._pump_osk()
+            for op in _as_settings(osk_nav_ops(self._state, self._config, now)):
+                self._send_settings(op)
+            steps = settings_scroll_steps(self._state, self._config, TICK_INTERVAL)
+            if steps:
+                self._send_event({"event": "scroll", "amount": steps})
+            return
         if self._state.mode not in PAD_MODES or self._virtual is None:
             return
         # In every pad mode, including OSK: while the keyboard is *down*, this
@@ -1304,6 +1648,9 @@ class Daemon:
         self._stop_osk()
         if was is Mode.OVERLAY:
             self._schedule_return()
+        if was is Mode.SETTINGS:
+            self._state.capture = False
+            self._send_event({"event": "released"})
 
     def _enter_desktop(self) -> bool:
         """Start desktop mode, or back out cleanly if uinput is unavailable."""
@@ -1393,7 +1740,7 @@ class Daemon:
         """
         if self._state.mode is Mode.OSK:
             return
-        if self._state.mode not in POINTER_MODES:
+        if self._state.mode not in (*POINTER_MODES, Mode.SETTINGS):
             return
         if self._osk is None or not self._osk.start():
             log.info("no on-screen keyboard in this session")

@@ -92,6 +92,16 @@ KEYPAD_KEYS: tuple[int, ...] = tuple(
 RELEASE_RATIO = 0.5
 
 
+def sector_name(stick: str, sector: int) -> str:
+    """``("LS", 1)`` -> ``"LS_UP_RIGHT"``."""
+    return f"{stick}_{_SECTOR_SUFFIXES[sector]}"
+
+
+def stick_of(axis: int) -> str | None:
+    """``"LS"`` or ``"RS"`` for a stick axis, else None."""
+    return _AXIS_TO_STICK.get(axis)
+
+
 def canonical_sector(name: str) -> str | None:
     """``"ls_up_right"`` -> ``"LS_UP_RIGHT"``; None if it is not a sector."""
     key = name.strip().upper().replace("-", "_").replace(" ", "_")
@@ -173,7 +183,7 @@ def step(
             if not aim.dirty:
                 continue
             aim.dirty = False
-            sector = _track(aim, threshold, settle, now)
+            sector = track(aim, threshold, settle, now)
             if sector is not None:
                 keys += _act(
                     bindings.get(f"{stick}_{_SECTOR_SUFFIXES[sector]}"), state
@@ -188,8 +198,12 @@ def step(
     return _act(bindings.get(name), state)
 
 
-def _track(aim: StickAim, threshold: float, settle: float, now: float) -> int | None:
-    """Follow one stick; the sector to type when it comes home, else None."""
+def track(aim: StickAim, threshold: float, settle: float, now: float) -> int | None:
+    """Follow one stick; the sector it pointed at once it comes home, else None.
+
+    Also what the settings window's press-to-assign uses to learn a stick
+    direction, for the same reason: aim, then let go.
+    """
     magnitude = math.hypot(aim.x, aim.y)
     if magnitude >= threshold:
         sector = sector_of(aim.x, aim.y)

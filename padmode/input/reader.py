@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import select
 import selectors
 import time
 from collections.abc import Iterator
@@ -309,8 +310,8 @@ class GamepadReader:
 
         For things the daemon listens to besides the pad -- the lock-screen
         monitor is the first. Nothing is read from ``fd`` here; the owner
-        drains it. While no pad is connected nothing is selected at all, so a
-        watched pipe simply fills up and is drained once one appears.
+        drains it. Watched descriptors are heard while no pad is connected
+        too: the settings window's Apply must not wait for a controller.
         """
         if fd in self._watched:
             return
@@ -382,7 +383,7 @@ class GamepadReader:
             while not self._stop:
                 device = self._open()
                 if device is None:
-                    time.sleep(self._retry_delay)
+                    yield from self._wait(self._retry_delay)
                     continue
                 log.info("listening on %s (%s)", device.path, device.name)
                 try:
@@ -393,9 +394,30 @@ class GamepadReader:
                 finally:
                     self._close()
                 if not self._stop:
-                    time.sleep(self._retry_delay)
+                    yield from self._wait(self._retry_delay)
         finally:
             self._close()
+
+    def _wait(self, seconds: float) -> Iterator[Event | None]:
+        """Sit out ``seconds`` with no pad, still answering watched descriptors.
+
+        Waiting by sleeping was fine while the pad was all there was. The
+        settings window's Apply must work with the controller switched off --
+        it is a window, and a mouse can click it -- so the control socket has
+        to be heard here too. Measured: with ``time.sleep`` a reload sent while
+        no pad was connected waited forever.
+        """
+        deadline = time.monotonic() + seconds
+        while not self._stop:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return
+            if not self._watched:
+                time.sleep(left)
+                return
+            ready, _, _ = select.select(list(self._watched), [], [], left)
+            if ready:
+                yield WAKE
 
     def _pump(self, device: InputDevice) -> Iterator[Event | None]:
         """Yield events, interleaving ticks on a fixed schedule when enabled.

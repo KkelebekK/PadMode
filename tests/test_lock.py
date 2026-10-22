@@ -238,6 +238,23 @@ class ReaderWatchTest(unittest.TestCase):
                 os.close(fd)
 
 
+class ReaderWithoutAPadTest(unittest.TestCase):
+    def test_watched_descriptors_are_heard_with_no_pad(self):
+        from padmode.input import reader as reader_module
+
+        r, w = os.pipe()
+        try:
+            reader = reader_module.GamepadReader(retry_delay=5.0)
+            reader.watch(r)
+            os.write(w, b"x")
+            loop = reader._wait(5.0)
+            self.assertEqual(next(loop), reader_module.WAKE)
+            loop.close()
+        finally:
+            os.close(r)
+            os.close(w)
+
+
 class FakeReader:
     def __init__(self, script) -> None:
         self.script = script

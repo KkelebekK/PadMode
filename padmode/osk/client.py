@@ -40,6 +40,16 @@ class OskClient:
         #: True once the renderer says it is up and layer-shell worked.
         self.ready = False
 
+    def reconfigure(self, config, keep_running: bool = False) -> None:
+        """Use new settings. The renderer reads them only when spawned, so it
+        is stopped and comes back with them the next time it is needed --
+        unless it is on screen right now, in which case the change waits for
+        it to close rather than pulling the keyboard out from under a finger.
+        """
+        self._config = config
+        if not keep_running:
+            self.stop()
+
     @property
     def alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None

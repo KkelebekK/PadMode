@@ -44,6 +44,10 @@ class ActionRunner:
         self._available: dict[str, bool] = {}
         self._warned: set[str] = set()
 
+    def set_context(self, context: ActionContext) -> None:
+        """Use new settings from here on (a reload, from the settings window)."""
+        self._ctx = context
+
     def available(self, binary: str) -> bool:
         """Is this external command installed? Probed once, then cached."""
         if binary not in self._available:
