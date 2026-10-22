@@ -543,6 +543,14 @@ been removed, so nothing else competes for the gamepad any more.
 ## 9. Reference
 
 Detail lives in `docs/`, so this file stays a contract rather than a spec dump.
+
+**The README is a front page, not a manual** (maintainer, 2026-10-22): what it
+is, a short feature list, the default controls, install, a compatibility
+table, one config example, license — the shape of input-remapper's or
+sc-controller's. How things work and every option go in `docs/usage.md` and
+`docs/configuration.md`; tests and the roadmap in `docs/development.md`. Keep
+it near 130 lines: someone deciding whether to install does not read the
+reasoning.
 These were distilled from a working implementation; prefer them over
 re-deriving:
 

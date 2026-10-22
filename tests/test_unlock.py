@@ -248,15 +248,15 @@ class LockChangedTest(unittest.TestCase):
 
 
 class XboxLayoutTest(unittest.TestCase):
-    """The README's Xbox-style layout parses, and types what it promises."""
+    """The documented Xbox-style layout parses, and types what it promises."""
 
-    def test_the_readme_block(self):
+    def test_the_documented_block(self):
         import pathlib
         import re
         import tomllib
 
-        readme = pathlib.Path(__file__).resolve().parent.parent / "README.md"
-        blocks = re.findall(r"```toml\n(.*?)```", readme.read_text(), re.S)
+        usage = pathlib.Path(__file__).resolve().parent.parent / "docs" / "usage.md"
+        blocks = re.findall(r"```toml\n(.*?)```", usage.read_text(), re.S)
         block = next(b for b in blocks if 'DPAD_LEFT = "2"' in b)
         data = tomllib.loads(block)
         data["unlock"]["enabled"] = True
