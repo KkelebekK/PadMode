@@ -35,7 +35,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from .. import config  # noqa: E402
 from ..actions.builtin import ACTIONS  # noqa: E402
-from . import model  # noqa: E402
+from . import model, motion  # noqa: E402
 from .link import DaemonLink  # noqa: E402
 from .service import Service  # noqa: E402
 
@@ -47,7 +47,8 @@ APP_ID = "io.github.KkelebekK.PadMode.Settings"
 SCROLL_STEP = 48
 
 #: How long the tab highlight takes to slide to a new tab, in milliseconds.
-TAB_SLIDE_MS = 260
+#: Long enough for the squash and stretch to read (motion.py).
+TAB_SLIDE_MS = 380
 
 CSS = b"""
 .padmode-tabs .tab { background: none; box-shadow: none; min-width: 92px; }
@@ -1013,7 +1014,8 @@ class TabBar(Gtk.Fixed):
     """The page tabs, with a highlight that slides from tab to tab.
 
     libadwaita's own switcher jumps; this one glides, the way a console's
-    settings menu does -- asked for by the maintainer. The highlight is a
+    settings menu does -- asked for by the maintainer, then with squash and
+    stretch on top (:mod:`padmode.settings.motion`). The highlight is a
     pill drawn *under* the row of buttons (a :class:`Gtk.Fixed` paints its
     children in the order they were added), and an animation moves and
     resizes it between the old tab's bounds and the new one's. Pad, mouse
@@ -1075,13 +1077,19 @@ class TabBar(Gtk.Fixed):
         if self._animation is not None:
             self._animation.skip()
 
-        def step(t: float) -> None:
-            self._put_pill(*(a + (b - a) * t for a, b in zip(start, target)))
+        edges_from = (start[0], start[0] + start[2])
+        edges_to = (target[0], target[0] + target[2])
+        top, height = target[1], target[3]
 
+        def step(t: float) -> None:
+            left, right, h = motion.pill(t, edges_from, edges_to, height)
+            self._put_pill(left, top + (height - h) / 2, right - left, h)
+
+        # Linear: the curves live in motion.pill, one per edge.
         animation = Adw.TimedAnimation(
             widget=self, value_from=0.0, value_to=1.0, duration=TAB_SLIDE_MS,
             target=Adw.CallbackAnimationTarget.new(step),
-            easing=Adw.Easing.EASE_OUT_CUBIC)
+            easing=Adw.Easing.LINEAR)
         self._animation = animation
         animation.play()
 
