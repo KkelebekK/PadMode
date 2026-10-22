@@ -251,6 +251,28 @@ small writer for our own schema, or edits made in place. Decide that first.
 - **Nothing is saved until Apply.** Apply writes the file and the daemon picks
   it up at once. Closing with unapplied changes asks: apply, discard and close,
   or go back.
+- **Rebinding is press-to-assign**, the console way: the window asks for a
+  button, you press it on the pad, that is the button — stick directions
+  included. Picking from a list stays as the fallback. The daemon holds the
+  pad in desktop mode, so it is the daemon that reports the press.
+- **Guide + R3 opens it**, as a default binding (`R3 = "settings"`) that can be
+  rebound like any other. Opening it also enters desktop mode, so the pad can
+  drive it straight away. An application-menu entry and `padmode settings`
+  exist regardless.
+
+How it is built, in order — each step usable and tested before the next:
+
+1. `padmode/tomledit.py`: the in-place writer. Pure stdlib; every edit is
+   re-read with `tomllib` and checked with `config.parse` before it can be
+   written.
+2. A control socket on the daemon (`$XDG_RUNTIME_DIR/padmode.sock`, line JSON
+   like the keyboard's pipe): `reload` for Apply, `capture` for
+   press-to-assign. A reload that fails keeps the old config and says why.
+3. The window (`python -m padmode.settings`, GTK4 like the keyboard, its own
+   process): pages, Apply, the unapplied-changes prompt, keyboard navigation.
+4. The four pages: bindings, feel, overlays and frontend, Steam ignore list.
+5. The `settings` action and its Guide + R3 default, the menu entry,
+   `install.sh`, docs — then a live run with the pad, and the release.
 
 ---
 
