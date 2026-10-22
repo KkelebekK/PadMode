@@ -199,6 +199,16 @@ class Window(Adw.ApplicationWindow):
             self.tabs.add(name, title, icon, self._tab_colours[name])
 
         self.connect("close-request", self._on_close_request)
+        # Sounds for the keyboard as well as the pad (the maintainer noticed
+        # arrows were silent); the mouse stays quiet. A move sounds when focus
+        # lands on a new row soon after a key or a pad step -- one place, so
+        # the two cannot both sound for the same move.
+        self._steered_at = 0.0
+        self._sounded_row = None
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self._on_key)
+        self.add_controller(keys)
+        self.connect("notify::focus-widget", lambda *_: self._focus_moved())
         # Start on the first row, once there is something mapped to focus: a
         # callback queued before that is silently lost.
         self.connect("map", lambda _w: GLib.timeout_add(80, self._focus_first))
@@ -299,8 +309,7 @@ class Window(Adw.ApplicationWindow):
                 step = 1 if direction in ("down", "right") else -1
                 i = 0 if current is None else max(0, min(len(stops) - 1,
                                                         current + step))
-                if i != current:
-                    self.sounds.play("nav")
+                self._steered()
                 stops[i].grab_focus()
             return
         focus = self.get_focus()
@@ -315,8 +324,7 @@ class Window(Adw.ApplicationWindow):
             rows = [r for r in _rows(self.stack.get_visible_child()) if _usable(r)]
             i = rows.index(row) if row in rows else 0
             j = max(0, min(len(rows) - 1, i + (1 if direction == "down" else -1)))
-            if j != i:
-                self.sounds.play("nav")
+            self._steered()
             rows[j].grab_focus()
             return
         # Left and right walk the row's own controls: the row, then whatever
@@ -329,6 +337,7 @@ class Window(Adw.ApplicationWindow):
         stops[j].grab_focus()
 
     def act(self, action: str) -> None:
+        self._steered()
         self.set_focus_visible(True)
         self.sounds.play({"select": "select", "back": "back",
                           "page_prev": "nav", "page_next": "nav",
@@ -378,6 +387,46 @@ class Window(Adw.ApplicationWindow):
             widget.emit("clicked")
         elif widget is not None:
             widget.activate()
+
+    def _steered(self) -> None:
+        """A key or a pad step is moving focus: the next move may sound."""
+        self._steered_at = GLib.get_monotonic_time()
+
+    def _focus_moved(self) -> None:
+        focus = self.get_focus()
+        row = _row_of(focus) or focus
+        if row is self._sounded_row:
+            return
+        self._sounded_row = row
+        if GLib.get_monotonic_time() - self._steered_at < 300_000:
+            self.sounds.play("nav")
+
+    def _on_key(self, _controller, keyval, _code, state) -> bool:
+        name = Gdk.keyval_name(keyval) or ""
+        ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        # Pages from the keyboard, as games do it -- Q and E for LB and RB,
+        # the maintainer's expectation -- and as desktop apps do it, with
+        # Ctrl+PageUp/PageDown and Ctrl+Tab. Q and E are letters inside a
+        # text field, so they only turn pages outside one.
+        focus = self.get_focus()
+        # A text row, not a number's box: those hold text focus too, and Q
+        # there is no digit anyway (measured: Q did nothing on the Feel page).
+        typing = focus is not None and focus.get_ancestor(Adw.EntryRow) is not None
+        if self._dialog is None and (
+                (not typing and not ctrl and name in ("q", "e", "Q", "E"))
+                or (ctrl and name in ("Page_Up", "Page_Down", "Tab",
+                                      "ISO_Left_Tab"))):
+            back = name in ("q", "Q", "Page_Up", "ISO_Left_Tab")
+            self.act("page_prev" if back else "page_next")
+            return True
+        if name in ("Up", "Down", "Left", "Right", "Tab", "ISO_Left_Tab",
+                    "Page_Up", "Page_Down", "Home", "End"):
+            self._steered()
+        elif name in ("Return", "KP_Enter", "space"):
+            self.sounds.play("select")
+        elif name == "Escape":
+            self.sounds.play("back")
+        return False   # only listening: the key still does its job
 
     def _handler_for(self, widget: Gtk.Widget | None) -> Handler | None:
         while widget is not None:

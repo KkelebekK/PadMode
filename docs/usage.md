@@ -377,6 +377,10 @@ The pad drives it directly, like a console's settings menu:
 | Right stick | Scroll |
 | Guide | Let go of the pad; the window stays open for the mouse |
 
+On the keyboard, Q and E turn pages the way games do (or Ctrl+PageUp/PageDown
+and Ctrl+Tab), the arrows move between rows, Enter selects and Escape goes
+back. The console tones play for the keyboard and the pad, never the mouse.
+
 To rebind, select a row and press the button you want — a stick direction
 works too. If that button already did something, the window tells you what it
 no longer does. Mouse and keyboard work everywhere as well.
