@@ -289,8 +289,11 @@ a shape: corner radius and how the focused row shows — fill, ring or bar
 the rest are decided one at a time. **Typography: Nunito** (rounded, friendly,
 Switch-like; heavy headings) — shipped with the window under the OFL rather
 than expected on the system. **Density: couch** — read from across the room: base
-type 1.3×, 76 px rows, 32 px badges, the window opening at 1280×900. Depth,
-iconography, motion and sound are still to be decided.
+type 1.3×, 76 px rows, 32 px badges, the window opening at 1280×900. **Depth: the
+focused row floats** — rows are separate surfaces with a gap, and the one
+with focus springs up 3% with a shadow under it, on top of the theme's own
+mark (`themes.depth_css`, `FLOAT_*`). Iconography, motion and sound are still
+to be decided.
 
 How it is built, in order — each step usable and tested before the next:
 

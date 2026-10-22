@@ -110,18 +110,42 @@ def css(theme: Theme) -> str:
     return "\n".join(lines)
 
 
+#: Depth, decided with the maintainer: the focused row *floats* -- lifted a
+#: little, with a shadow under it -- on top of whatever the theme marks it
+#: with. The curve overshoots, so it springs up rather than slides.
+FLOAT_SCALE = 1.03
+FLOAT_SHADOW = "0 10px 24px rgba(0, 0, 0, 0.45)"
+FLOAT_EASE = "cubic-bezier(0.3, 1.4, 0.6, 1)"
+
+
 def _focus_rule(scope: str, theme: Theme) -> str:
     row = f"{scope} row:focus-within"
+    lift = f"transform: scale({FLOAT_SCALE}); outline: none;"
     if theme.focus == "ring":
-        return (f"{row} {{ box-shadow: inset 0 0 0 2px var(--accent-bg-color); "
-                f"outline: none; }}")
+        return (f"{row} {{ box-shadow: inset 0 0 0 2px var(--accent-bg-color), "
+                f"{FLOAT_SHADOW}; {lift} }}")
     if theme.focus == "bar":
-        return (f"{row} {{ box-shadow: inset 4px 0 0 var(--accent-bg-color); "
-                f"background-color: var(--pm-pill); outline: none; }}")
+        return (f"{row} {{ box-shadow: inset 4px 0 0 var(--accent-bg-color), "
+                f"{FLOAT_SHADOW}; background-color: var(--pm-pill); {lift} }}")
     return (f"{row} {{ background-color: var(--accent-bg-color); "
-            f"color: var(--accent-fg-color); outline: none; }}\n"
+            f"color: var(--accent-fg-color); box-shadow: {FLOAT_SHADOW}; {lift} }}\n"
             f"{row} .dim-label, {row} .subtitle {{ color: var(--accent-fg-color); }}")
 
 
+def depth_css() -> str:
+    """Rows as separate surfaces with a gap between them, so the focused one
+    can rise out of the list rather than out of a box. Shared by every theme."""
+    return f"""
+.padmode-settings list.boxed-list {{ background: none; box-shadow: none; }}
+.padmode-settings list.boxed-list > row {{
+  background-color: var(--card-bg-color); border: none; margin-bottom: 6px;
+  border-radius: var(--pm-radius);
+  transition: transform 200ms {FLOAT_EASE}, box-shadow 200ms ease-out,
+              background-color 150ms ease-out;
+}}
+.padmode-settings list.boxed-list > row:focus-within {{ margin-top: 2px; margin-bottom: 8px; }}
+"""
+
+
 def all_css() -> str:
-    return "\n\n".join(css(theme) for theme in THEMES.values())
+    return "\n\n".join([depth_css(), *(css(theme) for theme in THEMES.values())])
