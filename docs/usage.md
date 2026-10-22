@@ -348,7 +348,9 @@ Open it whichever way is nearest: hold **Guide** and press **R3**; search for
 use the desktop shortcut, if you let `install.sh` make one; or run
 `padmode settings`. Five pages:
 
-- **General** — whether padmode starts when you log in, whether it is
+- **General** — the window's theme (Dracula, night blue, console green, warm
+  amber, or following the system's light or dark look), whether padmode
+  starts when you log in, whether it is
   running, and buttons to start, restart or stop it. Stopping asks first:
   it takes the pad away from the window too.
 - **Buttons** — what each Guide combo does, desktop mode's buttons, and the

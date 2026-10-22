@@ -277,6 +277,18 @@ small writer for our own schema, or edits made in place. Decide that first.
   application menu or `padmode settings` instead, the window asks the daemon
   for the pad itself.
 
+**Look, decided with the maintainer (2026-10-22):** the *console* layout —
+tabs down the left rail with a highlight that slides with squash and stretch
+(`settings/motion.py`), large rows, the pad's face buttons as coloured badges
+in their own colours, a hint bar along the bottom (A Select, B Back, LB/RB
+Page, Start Apply, Y Default, Guide Let go). Five themes, chosen in the window
+(`[appearance] theme`): `system` (libadwaita follows the desktop), `dracula`
+(the maintainer's usual), `night`, `green`, `amber`. A theme is a palette *and*
+a shape: corner radius and how the focused row shows — fill, ring or bar
+(`settings/themes.py`). Colour was one aesthetic decision of several;
+typography, density, depth, iconography and motion are still to be decided
+one at a time.
+
 How it is built, in order — each step usable and tested before the next:
 
 1. ✅ `padmode/tomledit.py`: the in-place writer. Pure stdlib; every edit is

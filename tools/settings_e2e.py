@@ -117,8 +117,10 @@ def main() -> int:
             flick(e.ABS_HAT0X, -1)
             press(e.BTN_EAST)
             time.sleep(1.5)
-            flick(e.ABS_HAT0X, -1)
-            flick(e.ABS_HAT0X, 1)
+            # The dialog's buttons are stacked, "Apply and close" on top
+            # and focused: wander down one and back up before taking it.
+            flick(e.ABS_HAT0Y, 1)
+            flick(e.ABS_HAT0Y, -1)
             press(e.BTN_SOUTH)
             time.sleep(0.8)
         window.wait(timeout=40)

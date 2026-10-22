@@ -66,6 +66,7 @@ OSK = ("osk",)
 GENERAL = ("general",)
 WINDOWS = ("windows",)
 UNLOCK = ("unlock",)
+APPEARANCE = ("appearance",)
 
 #: The Feel page, group by group. Ranges are the config parser's own, so the
 #: window can never offer a value the daemon would refuse.
@@ -130,6 +131,14 @@ OVERLAY_TIMING: tuple[Field, ...] = (
 UNLOCK_SWITCH = Toggle(UNLOCK, "enabled", "Unlock with the pad",
                        "Needs a password made only of digits")
 
+THEME = Choice(APPEARANCE, "theme", "Theme", "How this window looks", (
+    ("system", "Follow the system"),
+    ("dracula", "Dracula"),
+    ("night", "Night blue"),
+    ("green", "Console green"),
+    ("amber", "Warm amber"),
+))
+
 
 def default_of(field: Field) -> Any:
     return _attr(config.Config(), field)
@@ -138,7 +147,7 @@ def default_of(field: Field) -> Any:
 def _attr(cfg: config.Config, field: Field) -> Any:
     holder: Any = {
         GENERAL: cfg, DESKTOP: cfg.desktop, OSK: cfg.osk,
-        WINDOWS: cfg.windows, UNLOCK: cfg.unlock,
+        WINDOWS: cfg.windows, UNLOCK: cfg.unlock, APPEARANCE: cfg.appearance,
     }[field.table]
     return getattr(holder, field.key)
 

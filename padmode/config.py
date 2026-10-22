@@ -337,6 +337,19 @@ class UnlockConfig:
     )
 
 
+#: The settings window's themes (v0.8). "system" follows the desktop's light
+#: or dark scheme and accent colour; the rest are the window's own.
+THEMES = ("system", "dracula", "night", "green", "amber")
+
+
+@dataclass(frozen=True)
+class AppearanceConfig:
+    """How the settings window looks. Read by the window only; the daemon
+    parses it so a typo is caught the same way as everywhere else."""
+
+    theme: str = "system"
+
+
 @dataclass(frozen=True)
 class Config:
     """Fully resolved configuration. Immutable once built."""
@@ -361,6 +374,7 @@ class Config:
     windows: WindowsConfig = field(default_factory=WindowsConfig)
     osk: OskConfig = field(default_factory=OskConfig)
     unlock: UnlockConfig = field(default_factory=UnlockConfig)
+    appearance: AppearanceConfig = field(default_factory=AppearanceConfig)
     #: Overlay name -> definition. Empty by default: an overlay needs an app,
     #: and we do not know which apps anyone has.
     overlays: dict[str, Overlay] = field(default_factory=dict)
@@ -536,7 +550,16 @@ def parse(data: dict[str, Any]) -> Config:
                                      if k != enter})
     cfg = replace(cfg, desktop=_parse_desktop(_table(data, "desktop"), cfg))
     cfg = replace(cfg, unlock=_parse_unlock(_table(data, "unlock"), cfg.modifier))
+    cfg = replace(cfg, appearance=_parse_appearance(_table(data, "appearance")))
     return cfg
+
+
+def _parse_appearance(table: dict[str, Any]) -> AppearanceConfig:
+    _reject_unknown(table, {"theme"}, "appearance")
+    theme = table.get("theme", "system")
+    if theme not in THEMES:
+        raise ConfigError(f"appearance.theme must be one of {', '.join(THEMES)}")
+    return AppearanceConfig(theme=theme)
 
 
 def _parse_unlock(table: dict[str, Any], modifier: str) -> UnlockConfig:

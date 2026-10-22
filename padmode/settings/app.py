@@ -35,7 +35,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from .. import config  # noqa: E402
 from ..actions.builtin import ACTIONS  # noqa: E402
-from . import model, motion  # noqa: E402
+from . import model, motion, themes  # noqa: E402
 from .link import DaemonLink  # noqa: E402
 from .service import Service  # noqa: E402
 
@@ -51,15 +51,29 @@ SCROLL_STEP = 48
 TAB_SLIDE_MS = 380
 
 CSS = b"""
-.padmode-tabs .tab { background: none; box-shadow: none; min-width: 92px; }
-.padmode-tabs .tab:hover { background-color: alpha(currentColor, 0.05); }
-.padmode-tabs .tab-pill {
-  background-color: alpha(currentColor, 0.1);
-  border-radius: 9px;
-}
-.padmode-settings row { min-height: 52px; }
-.padmode-settings .binding-button { font-weight: bold; }
-.padmode-settings .capturing { background-color: alpha(@accent_bg_color, 0.25); }
+.padmode-settings .pm-rail { background-color: var(--pm-rail); padding: 14px 10px; }
+.padmode-settings .pm-rail .pm-name { font-weight: bold; font-size: 1.15em;
+  margin: 2px 10px 14px; }
+.pm-tabs .tab { background: none; box-shadow: none; min-width: 168px;
+  padding: 10px 14px; color: var(--pm-muted); }
+.pm-tabs .tab:hover { background-color: alpha(currentColor, 0.05); }
+.pm-tabs .tab.on { color: var(--pm-pill-fg); }
+.pm-tabs .tab label { font-size: 1.08em; }
+.pm-tabs .tab-pill { background-color: var(--pm-pill); }
+.padmode-settings row { min-height: 60px; }
+.padmode-settings row .title { font-size: 1.07em; }
+.padmode-settings .capturing { box-shadow: inset 0 0 0 2px var(--accent-bg-color); }
+.pm-badge { min-width: 24px; min-height: 24px; padding: 0 4px; border-radius: 12px;
+  font-weight: bold; font-size: 0.85em; color: var(--pm-badge-fg); }
+.pm-badge.pm-a { background-color: var(--pm-a); }
+.pm-badge.pm-b { background-color: var(--pm-b); }
+.pm-badge.pm-x { background-color: var(--pm-x); }
+.pm-badge.pm-y { background-color: var(--pm-y); }
+.pm-badge.pm-chip { background-color: alpha(currentColor, 0.15); color: inherit;
+  border-radius: 6px; }
+.pm-hints { background-color: var(--pm-rail); padding: 8px 16px; }
+.pm-hints .pm-hint { color: var(--pm-muted); margin-right: 18px; }
+.pm-hints.idle { opacity: 0.55; }
 """
 
 _DIRECTIONS = {
@@ -95,29 +109,40 @@ class Window(Adw.ApplicationWindow):
         self._dialog: Adw.Dialog | None = None
         #: The text row A put the caret in, until B takes it back out.
         self._editing: Adw.EntryRow | None = None
-        self.set_default_size(820, 760)
+        self.set_default_size(1000, 760)
         self.add_css_class("padmode-settings")
+        self._theme: str | None = None
 
         self.toasts = Adw.ToastOverlay()
         view = Adw.ToolbarView()
         self.toasts.set_child(view)
         self.set_content(self.toasts)
 
+        # The console layout (CLAUDE.md §3.5): tabs down the left, the page on
+        # the right, what the pad's buttons do along the bottom.
         header = Adw.HeaderBar()
+        header.set_title_widget(Adw.WindowTitle(title="padmode settings"))
         self.apply_button = Gtk.Button(label="Apply")
         self.apply_button.add_css_class("suggested-action")
         self.apply_button.connect("clicked", lambda _b: self.apply())
         header.pack_end(self.apply_button)
-        self.stack = Adw.ViewStack()
-        self.tabs = TabBar(self.stack)
-        header.set_title_widget(self.tabs)
         view.add_top_bar(header)
 
         self.banner = Adw.Banner()
         self.banner.connect("button-clicked", lambda _b: self._banner_action())
         self._banner_do: Callable[[], None] | None = None
         view.add_top_bar(self.banner)
-        view.set_content(self.stack)
+
+        self.stack = Adw.ViewStack(hexpand=True)
+        self.tabs = TabBar(self.stack)
+        rail = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["pm-rail"])
+        rail.append(self.tabs)
+        body = Gtk.Box()
+        body.append(rail)
+        body.append(self.stack)
+        view.set_content(body)
+        self.hints = hint_bar()
+        view.add_bottom_bar(self.hints)
 
         self.pages: list[tuple[str, Callable[[], Adw.PreferencesPage]]] = [
             ("general", self._general_page),
@@ -141,6 +166,8 @@ class Window(Adw.ApplicationWindow):
         # callback queued before that is silently lost.
         self.connect("map", lambda _w: GLib.timeout_add(80, self._focus_first))
         self.connect("notify::is-active", lambda *_: self._activity_changed())
+        self.apply_theme(session.value(model.THEME))
+        self.hints.add_css_class("idle")
         self._refresh_status()
 
     # -- the daemon ----------------------------------------------------
@@ -186,8 +213,10 @@ class Window(Adw.ApplicationWindow):
         log.debug("pad: %s", event)
         if kind == "held":
             self._pad_held = True
+            self.hints.remove_css_class("idle")
         elif kind == "released":
             self._pad_held = False
+            self.hints.add_css_class("idle")
             self._let_go = True
             self._stop_capture()
         elif kind == "refused":
@@ -599,9 +628,7 @@ class Window(Adw.ApplicationWindow):
     def _binding_row(self, kind: str, button: str, value) -> Adw.ActionRow:
         row = Adw.ActionRow(title=GLib.markup_escape_text(
             model.action_label(kind, value)), activatable=True)
-        label = Gtk.Label(label=model.button_label(button))
-        label.add_css_class("binding-button")
-        row.add_suffix(label)
+        row.add_suffix(badge(button))
         remove = Gtk.Button(icon_name="user-trash-symbolic",
                             valign=Gtk.Align.CENTER, tooltip_text="Unbind")
         remove.add_css_class("flat")
@@ -639,8 +666,27 @@ class Window(Adw.ApplicationWindow):
         self.changed("buttons")
 
     # -- pages ---------------------------------------------------------
+    def apply_theme(self, name: str) -> None:
+        """Show a theme now. Saved only by Apply, like every other setting."""
+        if name == self._theme:
+            return
+        if self._theme is not None:
+            self.remove_css_class(f"theme-{self._theme}")
+        self.add_css_class(f"theme-{name}")
+        self._theme = name
+        theme = themes.THEMES[name]
+        Adw.StyleManager.get_default().set_color_scheme(
+            Adw.ColorScheme.DEFAULT if theme.follows_system
+            else Adw.ColorScheme.FORCE_DARK)
+
     def _general_page(self) -> Adw.PreferencesPage:
         page = Adw.PreferencesPage()
+        look = Adw.PreferencesGroup(title="Appearance")
+        theme_row = self._field_row(model.THEME)
+        theme_row.connect("notify::selected", lambda *_: self.apply_theme(
+            self.session.value(model.THEME)))
+        look.add(theme_row)
+        page.add(look)
         group = Adw.PreferencesGroup(title="padmode")
         service = self.session.service
         if service is None or self.session.autostart_saved is None:
@@ -1013,7 +1059,8 @@ class Window(Adw.ApplicationWindow):
 class TabBar(Gtk.Fixed):
     """The page tabs, with a highlight that slides from tab to tab.
 
-    libadwaita's own switcher jumps; this one glides, the way a console's
+    Down the left of the window, the console way (the layout the maintainer
+    chose). libadwaita's own switcher jumps; this one glides, the way a console's
     settings menu does -- asked for by the maintainer, then with squash and
     stretch on top (:mod:`padmode.settings.motion`). The highlight is a
     pill drawn *under* the row of buttons (a :class:`Gtk.Fixed` paints its
@@ -1024,10 +1071,10 @@ class TabBar(Gtk.Fixed):
 
     def __init__(self, stack: Adw.ViewStack) -> None:
         super().__init__()
-        self.add_css_class("padmode-tabs")
+        self.add_css_class("pm-tabs")
         self._stack = stack
         self._pill = Gtk.Box(css_classes=["tab-pill"])
-        self._row = Gtk.Box(spacing=4)
+        self._row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.put(self._pill, 0, 0)
         self.put(self._row, 0, 0)
         self._buttons: dict[str, Gtk.Button] = {}
@@ -1038,8 +1085,9 @@ class TabBar(Gtk.Fixed):
         self.connect("map", lambda *_: GLib.timeout_add(30, self._snap))
 
     def add(self, name: str, title: str, icon: str) -> None:
-        button = Gtk.Button(css_classes=["flat", "tab"],
-                            child=Adw.ButtonContent(label=title, icon_name=icon))
+        content = Adw.ButtonContent(label=title, icon_name=icon,
+                                    halign=Gtk.Align.START)
+        button = Gtk.Button(css_classes=["flat", "tab"], child=content)
         button.connect("clicked",
                        lambda _b: self._stack.set_visible_child_name(name))
         self._row.append(button)
@@ -1060,13 +1108,20 @@ class TabBar(Gtk.Fixed):
         self._at = (x, y, w, h)
 
     def _snap(self) -> bool:
+        self._mark()
         bounds = self._bounds()
         if bounds is None:
             return True   # not laid out yet; try again next tick
         self._put_pill(*bounds)
         return False
 
+    def _mark(self) -> None:
+        name = self._stack.get_visible_child_name()
+        for key, button in self._buttons.items():
+            (button.add_css_class if key == name else button.remove_css_class)("on")
+
     def slide(self) -> None:
+        self._mark()
         target = self._bounds()
         if target is None:
             return
@@ -1077,13 +1132,15 @@ class TabBar(Gtk.Fixed):
         if self._animation is not None:
             self._animation.skip()
 
-        edges_from = (start[0], start[0] + start[2])
-        edges_to = (target[0], target[0] + target[2])
-        top, height = target[1], target[3]
+        # Down the rail: the pill travels along y and squashes in x, the
+        # same curves turned on their side.
+        edges_from = (start[1], start[1] + start[3])
+        edges_to = (target[1], target[1] + target[3])
+        left, width = target[0], target[2]
 
         def step(t: float) -> None:
-            left, right, h = motion.pill(t, edges_from, edges_to, height)
-            self._put_pill(left, top + (height - h) / 2, right - left, h)
+            top, bottom, w = motion.pill(t, edges_from, edges_to, width)
+            self._put_pill(left + (width - w) / 2, top, w, bottom - top)
 
         # Linear: the curves live in motion.pill, one per edge.
         animation = Adw.TimedAnimation(
@@ -1095,6 +1152,38 @@ class TabBar(Gtk.Fixed):
 
 
 # -- helpers ----------------------------------------------------------------
+_FACE = {"A": "pm-a", "B": "pm-b", "X": "pm-x", "Y": "pm-y"}
+_SHORT = {"START": "Start", "SELECT": "Select", "GUIDE": "Guide"}
+
+
+def badge(button: str) -> Gtk.Label:
+    """A pad button as a console draws it: A, B, X, Y as coloured rounds in
+    their pad colours, the rest as small grey keys."""
+    if button.startswith(("LS_", "RS_", "DPAD_")):
+        text = model.button_label(button).replace("Left stick", "LS").replace(
+            "Right stick", "RS").replace("D-pad", "D")
+    else:
+        text = _SHORT.get(button, button)
+    label = Gtk.Label(label=text, valign=Gtk.Align.CENTER,
+                      halign=Gtk.Align.CENTER, hexpand=False,
+                      css_classes=["pm-badge", _FACE.get(button, "pm-chip")])
+    return label
+
+
+def hint_bar() -> Gtk.Box:
+    """What the pad does here, along the bottom of the window."""
+    bar = Gtk.Box(css_classes=["pm-hints"], spacing=0)
+    for buttons, text in ((("A",), "Select"), (("B",), "Back"),
+                          (("LB", "RB"), "Page"), (("START",), "Apply"),
+                          (("Y",), "Default"), (("GUIDE",), "Let go")):
+        hint = Gtk.Box(spacing=6, css_classes=["pm-hint"])
+        for b in buttons:
+            hint.append(badge(b))
+        hint.append(Gtk.Label(label=text))
+        bar.append(hint)
+    return bar
+
+
 def _regenerate(window: "Window") -> None:
     if window.session.dirty:
         window.toast("Apply first, so the list you see is the list it writes")
@@ -1249,7 +1338,7 @@ class App(Adw.Application):
             return
         Adw.Application.do_activate(self)
         provider = Gtk.CssProvider()
-        provider.load_from_data(CSS)
+        provider.load_from_data(CSS + b"\n" + themes.all_css().encode())
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(), provider,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
