@@ -351,7 +351,7 @@ not expose to ordinary clients:
 |---|---|---|---|
 | KDE Plasma (Wayland) | Yes | Yes — needs `kdotool` | Yes — needs `gtk4-layer-shell` |
 | Any X11 desktop | Yes | Yes — needs `xdotool` | **No** — not yet |
-| Hyprland / sway | Yes | Community backend | Should work, untested |
+| Hyprland / sway | Yes | **No** — not written yet | Should work, untested |
 | GNOME (Wayland) | Yes | **No** — see below | **No** — see below |
 | GNOME (X11) | Yes | Yes | **No** — not yet |
 

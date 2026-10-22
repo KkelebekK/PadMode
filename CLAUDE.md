@@ -549,7 +549,7 @@ is, a short feature list, the default controls, install, a compatibility
 table, one config example, license — the shape of input-remapper's or
 sc-controller's. How things work and every option go in `docs/usage.md` and
 `docs/configuration.md`; tests and the roadmap in `docs/development.md`. Keep
-it near 130 lines: someone deciding whether to install does not read the
+it under ~150 lines: someone deciding whether to install does not read the
 reasoning.
 These were distilled from a working implementation; prefer them over
 re-deriving:

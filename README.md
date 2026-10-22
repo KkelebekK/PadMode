@@ -79,12 +79,27 @@ and volume, `kdotool` (KDE) or `xdotool` (X11) for overlays,
 
 ## Compatibility
 
-| Desktop | Media + desktop mode | Overlays | On-screen keyboard |
-|---|---|---|---|
-| KDE Plasma (Wayland) | ✅ | ✅ | ✅ |
-| Any X11 desktop | ✅ | ✅ | ❌ |
-| Hyprland / sway | ✅ | — | untested |
-| GNOME (Wayland) | ✅ | ❌ | ❌ |
+| Desktop | Media + desktop mode | Overlays | On-screen keyboard | Unlock |
+|---|---|---|---|---|
+| KDE Plasma (Wayland) | ✅ | ✅ | ✅ | ✅ |
+| Any X11 desktop | ✅ | ✅ | ❌ | untested |
+| Hyprland / sway | ✅ | ❌ | untested | untested |
+| GNOME (Wayland) | ✅ | ❌ | ❌ | untested |
+
+Media keys and desktop mode work everywhere, because the pad simply acts like
+a real mouse and keyboard. The rest needs help from the desktop itself:
+
+- **Overlays on GNOME (Wayland)** — GNOME does not let one app bring another
+  to the front. It would take a GNOME Shell extension; not planned.
+- **Overlays on Hyprland / sway** — each of these controls windows its own
+  way, so each needs its own small piece of support. Possible, not written
+  yet — a good first contribution.
+- **On-screen keyboard on X11** — X11 needs a different way of drawing a
+  keyboard that floats above everything. Possible later, not scheduled.
+- **On-screen keyboard on GNOME** — GNOME does not offer the kind of
+  always-on-top panel the keyboard uses. Not planned.
+- **Unlock outside KDE** — it listens for the screen locking, and other
+  desktops announce that differently or not at all. Only KDE has been tried.
 
 `padmode windows` tells you what works on yours.
 
