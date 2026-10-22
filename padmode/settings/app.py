@@ -903,7 +903,8 @@ class Window(Adw.ApplicationWindow):
             return page
 
         switch = Adw.SwitchRow(title="Start padmode when you log in",
-                               subtitle="Takes effect when you press Apply",
+                               subtitle="So the pad works as soon as your desktop "
+                                        "is up. Saved when you press Apply",
                                active=bool(self.session.autostart))
         switch.add_prefix(tile("system-run-symbolic", model.POINTER))
 
@@ -983,7 +984,8 @@ class Window(Adw.ApplicationWindow):
         for kind, title, description in (
             (model.GUIDE, "Hold Guide and press",
              "Select a row, then press the button you want for it"),
-            (model.DESKTOP_MODE, "Desktop mode", "While the pad is a mouse"),
+            (model.DESKTOP_MODE, "Desktop mode",
+             "What the buttons do when the pad works as a mouse (Guide + L3)"),
         ):
             group = Adw.PreferencesGroup(title=title, description=description)
             bindings = s.bindings(kind)
@@ -1092,7 +1094,8 @@ class Window(Adw.ApplicationWindow):
         cfg = self.session.config
         group = Adw.PreferencesGroup(
             title="Overlays",
-            description="Apps that come up over your game on a Guide combo")
+            description="Apps that open on top of your game with a Guide combo, and "
+                        "close again to put you straight back in it")
         for name, overlay in sorted(cfg.overlays.items()):
             group.add(self._overlay_row(name, overlay))
         add = Adw.ActionRow(title="Add an app…", activatable=True)
@@ -1103,11 +1106,16 @@ class Window(Adw.ApplicationWindow):
         page.add(group)
 
         group = Adw.PreferencesGroup(
-            title="Frontend", description="Where the home button takes you")
+            title="Frontend",
+            description="Your game launcher, like Pegasus: where the home button "
+                        "takes you, and where you land if a game closes under an "
+                        "overlay")
         fe = cfg.frontend
-        cls = self._entry_row("Window class", fe.window_class if fe else "",
+        cls = self._entry_row("Window class (padmode windows lists them)",
+                              fe.window_class if fe else "",
                               lambda text: self._frontend(text, None))
-        cmd = self._entry_row("Command", shlex.join(fe.command) if fe and fe.command
+        cmd = self._entry_row("Command that starts it (optional)",
+                              shlex.join(fe.command) if fe and fe.command
                               else "", lambda text: self._frontend(None, text))
         group.add(cls)
         group.add(cmd)
@@ -1120,7 +1128,7 @@ class Window(Adw.ApplicationWindow):
             group.add(remove)
         page.add(group)
 
-        group = Adw.PreferencesGroup(title="Timing")
+        group = Adw.PreferencesGroup(title="When an app opens over a game")
         for field in model.OVERLAY_TIMING:
             group.add(self._field_row(field))
         page.add(group)
@@ -1140,9 +1148,11 @@ class Window(Adw.ApplicationWindow):
             self.session.set_overlay(name, state["class"], command)
             self.changed()
 
-        row.add_row(self._entry_row("Window class", state["class"],
+        row.add_row(self._entry_row("Window class (padmode windows lists them)",
+                                    state["class"],
                                     lambda t: (state.update({"class": t}), save())))
-        row.add_row(self._entry_row("Command", state["command"],
+        row.add_row(self._entry_row("Command that starts it (optional)",
+                                    state["command"],
                                     lambda t: (state.update({"command": t}), save())))
         remove = Adw.ButtonRow(title=f"Remove {name}")
         remove.add_css_class("destructive-action")
@@ -1241,8 +1251,7 @@ class Window(Adw.ApplicationWindow):
             shown_by_default = reason is None
             shown = (not ignore[app.appid]) if app.appid in ignore else shown_by_default
             row = Adw.SwitchRow(title=GLib.markup_escape_text(app.name),
-                                subtitle=f"Hidden by default: {reason}" if reason
-                                else f"App {app.appid}", active=shown)
+                                subtitle=_steam_reason(reason), active=shown)
             row.add_prefix(tile("applications-games-symbolic",
                                 model.HOME if reason is None else model.SYSTEM))
 
@@ -1366,6 +1375,16 @@ class TabBar(Gtk.Fixed):
 
 
 # -- helpers ----------------------------------------------------------------
+def _steam_reason(reason: str | None) -> str:
+    """Why padmode leaves an app out, said for someone who is not a Steam
+    expert. Empty for a game: it needs no explaining."""
+    if reason is None:
+        return ""
+    plain = {"compatibility tool": "a tool Steam uses to run games, not a game",
+             "dedicated server": "a game server, not something to play"}
+    return "Hidden by default: " + plain.get(reason, reason)
+
+
 SOUND_DIR = Path(__file__).resolve().parent / "sounds"
 
 

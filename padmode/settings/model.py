@@ -73,65 +73,65 @@ APPEARANCE = ("appearance",)
 FEEL: tuple[tuple[str, tuple[Field, ...]], ...] = (
     ("Pointer", (
         Number(DESKTOP, "pointer_speed", "Pointer speed",
-               "Pixels per second at full stick", 1, 20000, 50, 0),
+               "How fast the pointer moves with the stick pushed all the way", 1, 20000, 50, 0),
         Number(DESKTOP, "curve", "Acceleration curve",
-               "1 is linear; higher gives finer slow control", 1, 5, 0.1, 1),
+               "Higher makes small pushes slower, for precise aiming; 1 is even all the way", 1, 5, 0.1, 1),
         Number(DESKTOP, "scroll_speed", "Scroll speed",
-               "Wheel clicks per second at full stick", 0.1, 500, 1, 1),
+               "How fast pages scroll with the right stick", 0.1, 500, 1, 1),
         Number(DESKTOP, "dead_zone", "Dead zone",
-               "Ignore the stick this close to centre", 0, 0.9, 0.01),
+               "How far a stick moves before anything happens. Raise it if the pointer drifts by itself", 0, 0.9, 0.01),
     )),
     ("Sticks and buttons", (
         Number(DESKTOP, "stick_threshold", "Stick press point",
-               "How far a stick goes to count as a direction", 0.2, 0.95, 0.05),
-        Number(DESKTOP, "stick_settle", "Stick settle time",
-               "Seconds before a flicked stick can fire again", 0, 1, 0.01),
-        Number(DESKTOP, "stick_dominance", "Stick dominance",
-               "How much one axis must beat the other", 1, 10, 0.1, 1),
-        Number(DESKTOP, "button_debounce", "Button debounce",
-               "Ignore releases shorter than this, in seconds", 0, 0.5, 0.01),
+               "How far you push a stick before it counts as pressing up, down, left or right", 0.2, 0.95, 0.05),
+        Number(DESKTOP, "stick_settle", "Stick bounce guard",
+               "Stops a stick you let go of from springing back and pressing the opposite way. Raise it if that happens", 0, 1, 0.01),
+        Number(DESKTOP, "stick_dominance", "Direction strictness",
+               "How straight a push must be to count. Raise it if a diagonal push picks the wrong direction", 1, 10, 0.1, 1),
+        Number(DESKTOP, "button_debounce", "Double-press guard",
+               "Ignores a button that lets go for only an instant. Raise it if one click sometimes counts twice", 0, 0.5, 0.01),
         Number(GENERAL, "trigger_threshold", "Trigger press point",
-               "How far LT and RT are squeezed to count", 0.05, 0.95, 0.05),
+               "How far LT and RT go down before they count as pressed", 0.05, 0.95, 0.05),
     )),
     ("Sound", (
         Number(GENERAL, "volume_step", "Volume step",
-               "Percent per press", 1, 100, 1, 0, integer=True),
+               "How much one press of volume up or down changes it, in percent", 1, 100, 1, 0, integer=True),
     )),
     ("On-screen keyboard", (
-        Number(OSK, "height", "Size", "Percent of the screen's height",
+        Number(OSK, "height", "Size", "How much of the screen's height the keyboard covers, in percent",
                8, 70, 1, 0),
-        Choice(OSK, "position", "Starts at", "The edge it opens against",
+        Choice(OSK, "position", "Opens at", "The edge of the screen the keyboard appears at",
                (("bottom", "Bottom"), ("top", "Top"))),
         Toggle(OSK, "auto_open", "Open by itself",
-               "When you click into a text field"),
+               "Shows the keyboard when you select a text field. Needs the desktop's accessibility support turned on"),
         Number(OSK, "repeat_delay", "Repeat delay",
-               "Seconds a direction is held before it repeats", 0.05, 2, 0.05),
+               "How long you hold a direction before the highlight starts moving by itself, in seconds", 0.05, 2, 0.05),
         Number(OSK, "repeat_interval", "Repeat speed",
-               "Seconds between repeats; 0 turns repeat off", 0, 1, 0.01),
+               "Seconds between steps while you hold a direction. 0 turns this off", 0, 1, 0.01),
         Number(OSK, "move_speed", "Move speed",
-               "How fast the right stick slides it", 50, 20000, 50, 0),
+               "How fast the right stick slides the keyboard out of the way", 50, 20000, 50, 0),
     )),
     ("Unlock with the pad", (
         Number(UNLOCK, "stick_threshold", "Dial press point",
-               "How far the stick goes to aim at a digit", 0.2, 0.95, 0.05),
+               "At the lock screen: how far the stick goes before it aims at a digit", 0.2, 0.95, 0.05),
     )),
 )
 
 #: Settings that live on other pages but are fields all the same.
 OVERLAY_TIMING: tuple[Field, ...] = (
     Number(WINDOWS, "settle", "Return delay",
-           "Seconds between letting go of the pad and refocusing the game",
+           "A short pause before going back to your game, so a button you're still holding doesn't reach it",
            0, 5, 0.1, 1),
     Number(WINDOWS, "launch_timeout", "Launch timeout",
-           "How long to wait for an app's window", 0, 120, 1, 0),
-    Toggle(WINDOWS, "park_pointer", "Park the pointer",
-           "Move the cursor onto the overlay (focus-follows-mouse)"),
+           "How many seconds to wait for an app to open before giving up", 0, 120, 1, 0),
+    Toggle(WINDOWS, "park_pointer", "Move the pointer onto the app",
+           "Moves the mouse onto an app when it opens over your game, and back when you return. Only turn this on if your desktop gives focus to whatever is under the mouse, otherwise your game can grab the focus back"),
 )
 
 UNLOCK_SWITCH = Toggle(UNLOCK, "enabled", "Unlock with the pad",
-                       "Needs a password made only of digits")
+                       "Type your password with the pad at the lock screen. Only works with a password made of digits")
 
-THEME = Choice(APPEARANCE, "theme", "Theme", "How this window looks", (
+THEME = Choice(APPEARANCE, "theme", "Theme", "The colours and shapes of this window", (
     ("system", "Follow the system"),
     ("dracula", "Dracula"),
     ("night", "Night blue"),
@@ -140,18 +140,18 @@ THEME = Choice(APPEARANCE, "theme", "Theme", "How this window looks", (
 ))
 
 GLYPHS = Choice(APPEARANCE, "glyphs", "Button labels",
-                "Drawn the way your controller prints them", (
+                "Shows buttons the way your controller prints them, like ✕ ○ △ □ on a PlayStation pad", (
     ("auto", "Automatic"),
     ("xbox", "Xbox"),
     ("playstation", "PlayStation"),
     ("nintendo", "Nintendo"),
 ))
 
-SOUNDS = Choice(APPEARANCE, "sounds", "Sounds", "When the pad moves, selects and applies", (
+SOUNDS = Choice(APPEARANCE, "sounds", "Sounds", "Soft tones when you move, select and apply with the pad or the keyboard", (
     ("console", "Console tones"),
     ("off", "Off"),
 ))
-SOUND_VOLUME = Number(APPEARANCE, "sound_volume", "Sound volume", "Percent",
+SOUND_VOLUME = Number(APPEARANCE, "sound_volume", "Sound volume", "How loud those tones are, in percent",
                       0, 100, 5, 0, integer=True)
 
 
