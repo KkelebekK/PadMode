@@ -345,6 +345,9 @@ THEMES = ("system", "dracula", "night", "green", "amber")
 #: one family whatever is plugged in.
 GLYPHS = ("auto", "xbox", "playstation", "nintendo")
 
+#: The settings window's sounds: the console tones the maintainer chose, or none.
+SOUNDS = ("console", "off")
+
 
 @dataclass(frozen=True)
 class AppearanceConfig:
@@ -353,6 +356,9 @@ class AppearanceConfig:
 
     theme: str = "system"
     glyphs: str = "auto"
+    sounds: str = "console"
+    #: Percent of the files' own level.
+    sound_volume: int = 60
 
 
 @dataclass(frozen=True)
@@ -560,14 +566,22 @@ def parse(data: dict[str, Any]) -> Config:
 
 
 def _parse_appearance(table: dict[str, Any]) -> AppearanceConfig:
-    _reject_unknown(table, {"theme", "glyphs"}, "appearance")
+    _reject_unknown(table, {"theme", "glyphs", "sounds", "sound_volume"},
+                    "appearance")
     theme = table.get("theme", "system")
     if theme not in THEMES:
         raise ConfigError(f"appearance.theme must be one of {', '.join(THEMES)}")
     glyphs = table.get("glyphs", "auto")
     if glyphs not in GLYPHS:
         raise ConfigError(f"appearance.glyphs must be one of {', '.join(GLYPHS)}")
-    return AppearanceConfig(theme=theme, glyphs=glyphs)
+    sounds = table.get("sounds", "console")
+    if sounds not in SOUNDS:
+        raise ConfigError(f"appearance.sounds must be one of {', '.join(SOUNDS)}")
+    volume = table.get("sound_volume", 60)
+    if isinstance(volume, bool) or not isinstance(volume, int) or not 0 <= volume <= 100:
+        raise ConfigError("appearance.sound_volume must be a whole number, 0 to 100")
+    return AppearanceConfig(theme=theme, glyphs=glyphs, sounds=sounds,
+                            sound_volume=volume)
 
 
 def _parse_unlock(table: dict[str, Any], modifier: str) -> UnlockConfig:

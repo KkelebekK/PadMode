@@ -134,6 +134,8 @@ class Window(Adw.ApplicationWindow):
         self.set_default_size(1280, 900)
         self.add_css_class("padmode-settings")
         self._theme: str | None = None
+        self.sounds = Sounds()
+        self.sounds.set(session.value(model.SOUNDS), session.value(model.SOUND_VOLUME))
 
         self.toasts = Adw.ToastOverlay()
         view = Adw.ToolbarView()
@@ -268,6 +270,7 @@ class Window(Adw.ApplicationWindow):
         elif kind == "captured":
             callback, self._capturing = self._capturing, None
             self._clear_capture_style()
+            self.sounds.play("select")
             if callback is not None:
                 callback(event.get("input", ""))
         elif kind == "cancelled":
@@ -296,6 +299,8 @@ class Window(Adw.ApplicationWindow):
                 step = 1 if direction in ("down", "right") else -1
                 i = 0 if current is None else max(0, min(len(stops) - 1,
                                                         current + step))
+                if i != current:
+                    self.sounds.play("nav")
                 stops[i].grab_focus()
             return
         focus = self.get_focus()
@@ -310,6 +315,8 @@ class Window(Adw.ApplicationWindow):
             rows = [r for r in _rows(self.stack.get_visible_child()) if _usable(r)]
             i = rows.index(row) if row in rows else 0
             j = max(0, min(len(rows) - 1, i + (1 if direction == "down" else -1)))
+            if j != i:
+                self.sounds.play("nav")
             rows[j].grab_focus()
             return
         # Left and right walk the row's own controls: the row, then whatever
@@ -323,6 +330,9 @@ class Window(Adw.ApplicationWindow):
 
     def act(self, action: str) -> None:
         self.set_focus_visible(True)
+        self.sounds.play({"select": "select", "back": "back",
+                          "page_prev": "nav", "page_next": "nav",
+                          "reset": "back"}.get(action, ""))
         if self._dialog is not None:
             if action == "back":
                 self._dialog.close()
@@ -454,6 +464,7 @@ class Window(Adw.ApplicationWindow):
             self.toasts.add_toast(toast)
         else:
             self.toast("Applied")
+        self.sounds.play("apply")
         self._refresh_status()
         return True
 
@@ -789,6 +800,18 @@ class Window(Adw.ApplicationWindow):
         glyph_row = self._field_row(model.GLYPHS)
         glyph_row.connect("notify::selected", lambda *_: self.relabel())
         look.add(glyph_row)
+
+        def resound(*_):
+            self.sounds.set(self.session.value(model.SOUNDS),
+                            self.session.value(model.SOUND_VOLUME))
+            self.sounds.play("select")   # so the level can be heard
+
+        sounds_row = self._field_row(model.SOUNDS)
+        sounds_row.connect("notify::selected", resound)
+        look.add(sounds_row)
+        volume_row = self._field_row(model.SOUND_VOLUME)
+        volume_row.get_adjustment().connect("value-changed", resound)
+        look.add(volume_row)
         page.add(look)
         group = Adw.PreferencesGroup(title="padmode")
         service = self.session.service
@@ -1263,6 +1286,40 @@ class TabBar(Gtk.Fixed):
 
 
 # -- helpers ----------------------------------------------------------------
+SOUND_DIR = Path(__file__).resolve().parent / "sounds"
+
+
+class Sounds:
+    """The console tones, played when the pad moves, selects, goes back and
+    applies -- never for the mouse. Decided with the maintainer by ear; the
+    files are rendered by tools/make_sounds.py.
+
+    Loaded once, at start: a media file's first play pays for opening it, and
+    a navigation sound that arrives late is worse than none.
+    """
+
+    def __init__(self) -> None:
+        self._files: dict[str, Gtk.MediaFile] = {}
+        for name in ("nav", "select", "back", "apply"):
+            path = SOUND_DIR / f"{name}.wav"
+            if path.exists():
+                self._files[name] = Gtk.MediaFile.new_for_filename(str(path))
+        self.enabled = True
+        self.volume = 0.6
+
+    def set(self, kind: str, volume: int) -> None:
+        self.enabled = kind != "off"
+        self.volume = max(0, min(100, volume)) / 100
+
+    def play(self, name: str) -> None:
+        media = self._files.get(name)
+        if not self.enabled or media is None or self.volume <= 0:
+            return
+        media.set_volume(self.volume)
+        media.seek(0)
+        media.play()
+
+
 def badge(button: str, family: str = "xbox") -> Gtk.Label:
     """A pad button as *this* pad prints it (``glyphs.py``): A, B, X, Y --
     or ✕ ○ △ □ -- as coloured rounds, everything else as a small grey key."""
@@ -1511,6 +1568,10 @@ class App(Adw.Application):
             dialog.present(win)
             return
         self.window = Window(self, session)
+        if self.args.screenshot:
+            # Checking a layout, or the e2e harness: never out loud on the
+            # speakers of whoever is at the machine.
+            self.window.sounds.enabled = False
         if self.args.page:
             self.window.stack.set_visible_child_name(self.args.page)
         self.window.present()

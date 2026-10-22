@@ -303,7 +303,11 @@ otherwise — told by the daemon when the window takes the pad, overridable in
 pads. **Motion: fluid** — on top of the tab slide and the
 floating row, pages slide along the rail's direction (Gtk.Stack, 300 ms) and
 their rows rise into view one after another (55 ms apart, `pm-enter`); a
-rebuild after an edit does neither. Sound is still to be decided.
+rebuild after an edit does neither. **Sound: console tones** — soft sine and triangle
+blips for move, select, back and apply, rendered by `tools/make_sounds.py`
+into `settings/sounds/`, preloaded as Gtk.MediaFile, played for the pad only
+(never the mouse), with `[appearance] sounds` and `sound_volume`; screenshot
+and e2e runs are silent. Every aesthetic dimension is now decided.
 
 How it is built, in order — each step usable and tested before the next:
 

@@ -147,6 +147,13 @@ GLYPHS = Choice(APPEARANCE, "glyphs", "Button labels",
     ("nintendo", "Nintendo"),
 ))
 
+SOUNDS = Choice(APPEARANCE, "sounds", "Sounds", "When the pad moves, selects and applies", (
+    ("console", "Console tones"),
+    ("off", "Off"),
+))
+SOUND_VOLUME = Number(APPEARANCE, "sound_volume", "Sound volume", "Percent",
+                      0, 100, 5, 0, integer=True)
+
 
 def default_of(field: Field) -> Any:
     return _attr(config.Config(), field)
@@ -282,6 +289,8 @@ def icon_for_binding(kind: str, value: Any) -> tuple[str, int]:
 def icon_for_field(field: "Field") -> tuple[str, int]:
     """``(icon name, tile colour)`` for a number, switch or choice."""
     if field.table == APPEARANCE:
+        if field.key in ("sounds", "sound_volume"):
+            return "audio-volume-high-symbolic", SOUND
         return (("preferences-desktop-appearance-symbolic", SYSTEM)
                 if field.key == "theme" else ("input-gaming-symbolic", KEYBOARD))
     if field.table == OSK:
