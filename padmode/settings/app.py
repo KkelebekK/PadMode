@@ -57,35 +57,37 @@ TAB_SLIDE_MS = 380
 FONT_FILE = Path(__file__).resolve().parent / "fonts" / "Nunito[wght].ttf"
 
 CSS = b"""
-.padmode-settings { font-family: "Nunito"; }
+.padmode-settings { font-family: "Nunito"; font-size: 1.3em; }
 .padmode-settings .heading, .padmode-settings .title-1,
 .padmode-settings .title-2, .padmode-settings .title-3 { font-weight: 800; }
 .padmode-settings preferencesgroup .heading { font-size: 1.35em; }
 .padmode-settings row .title { font-weight: 600; }
 .pm-tabs .tab label { font-weight: 700; }
 .pm-hints label { font-weight: 600; }
-.padmode-settings .pm-rail { background-color: var(--pm-rail); padding: 14px 10px; }
+.padmode-settings .pm-rail { background-color: var(--pm-rail); padding: 18px 12px; }
 .padmode-settings .pm-rail .pm-name { font-weight: bold; font-size: 1.15em;
   margin: 2px 10px 14px; }
-.pm-tabs .tab { background: none; box-shadow: none; min-width: 168px;
-  padding: 10px 14px; color: var(--pm-muted); }
+.pm-tabs .tab { background: none; box-shadow: none; min-width: 200px;
+  padding: 14px 16px; color: var(--pm-muted); }
 .pm-tabs .tab:hover { background-color: alpha(currentColor, 0.05); }
 .pm-tabs .tab.on { color: var(--pm-pill-fg); }
 .pm-tabs .tab label { font-size: 1.08em; }
 .pm-tabs .tab-pill { background-color: var(--pm-pill); }
-.padmode-settings row { min-height: 60px; }
-.padmode-settings row .title { font-size: 1.07em; }
+.padmode-settings row { min-height: 76px; }
+.padmode-settings row .title { font-size: 1.05em; }
+.padmode-settings preferencespage > scrolledwindow > viewport > clamp > box {
+  margin-top: 18px; margin-bottom: 24px; }
 .padmode-settings .capturing { box-shadow: inset 0 0 0 2px var(--accent-bg-color); }
-.pm-badge { min-width: 24px; min-height: 24px; padding: 0 4px; border-radius: 12px;
-  font-weight: 800; font-size: 0.85em; color: var(--pm-badge-fg); }
+.pm-badge { min-width: 32px; min-height: 32px; padding: 0 3px; border-radius: 16px;
+  font-weight: 800; font-size: 0.8em; color: var(--pm-badge-fg); }
 .pm-badge.pm-a { background-color: var(--pm-a); }
 .pm-badge.pm-b { background-color: var(--pm-b); }
 .pm-badge.pm-x { background-color: var(--pm-x); }
 .pm-badge.pm-y { background-color: var(--pm-y); }
 .pm-badge.pm-chip { background-color: alpha(currentColor, 0.15); color: inherit;
   border-radius: 6px; }
-.pm-hints { background-color: var(--pm-rail); padding: 8px 16px; }
-.pm-hints .pm-hint { color: var(--pm-muted); margin-right: 18px; }
+.pm-hints { background-color: var(--pm-rail); padding: 12px 20px; }
+.pm-hints .pm-hint { color: var(--pm-muted); margin-right: 26px; }
 .pm-hints.idle { opacity: 0.55; }
 """
 
@@ -122,7 +124,9 @@ class Window(Adw.ApplicationWindow):
         self._dialog: Adw.Dialog | None = None
         #: The text row A put the caret in, until B takes it back out.
         self._editing: Adw.EntryRow | None = None
-        self.set_default_size(1000, 760)
+        # Couch density (decided with the maintainer): read from across the
+        # room, so the window opens big.
+        self.set_default_size(1280, 900)
         self.add_css_class("padmode-settings")
         self._theme: str | None = None
 

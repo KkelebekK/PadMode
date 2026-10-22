@@ -288,8 +288,9 @@ a shape: corner radius and how the focused row shows — fill, ring or bar
 (`settings/themes.py`). Colour was one aesthetic decision of several;
 the rest are decided one at a time. **Typography: Nunito** (rounded, friendly,
 Switch-like; heavy headings) — shipped with the window under the OFL rather
-than expected on the system. Density, depth, iconography, motion and sound are
-still to be decided.
+than expected on the system. **Density: couch** — read from across the room: base
+type 1.3×, 76 px rows, 32 px badges, the window opening at 1280×900. Depth,
+iconography, motion and sound are still to be decided.
 
 How it is built, in order — each step usable and tested before the next:
 
