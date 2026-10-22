@@ -398,7 +398,14 @@ class Window(Adw.ApplicationWindow):
         if row is self._sounded_row:
             return
         self._sounded_row = row
-        if GLib.get_monotonic_time() - self._steered_at < 300_000:
+        now = GLib.get_monotonic_time()
+        # Focus that moved *because* of a select or a back -- a list opening
+        # and taking it, a dialog closing and giving it back -- was not a
+        # step, and sounding it played two tones on top of each other
+        # (reported on the theme list).
+        if now - self.sounds.last_action < 250_000:
+            return
+        if now - self._steered_at < 300_000:
             self.sounds.play("nav")
 
     def _on_key(self, _controller, keyval, _code, state) -> bool:
@@ -1355,12 +1362,16 @@ class Sounds:
                 self._files[name] = Gtk.MediaFile.new_for_filename(str(path))
         self.enabled = True
         self.volume = 0.6
+        #: When something other than a move last sounded, in microseconds.
+        self.last_action = 0
 
     def set(self, kind: str, volume: int) -> None:
         self.enabled = kind != "off"
         self.volume = max(0, min(100, volume)) / 100
 
     def play(self, name: str) -> None:
+        if name != "nav":
+            self.last_action = GLib.get_monotonic_time()
         media = self._files.get(name)
         if not self.enabled or media is None or self.volume <= 0:
             return
