@@ -614,9 +614,31 @@ class Window(Adw.ApplicationWindow):
             self._quietly(lambda: row.set_selected(values.index(session.value(field))))
             self.changed()
 
-        self._handlers[row] = Handler(select=lambda: adjust(1), adjust=adjust,
-                                      reset=reset)
+        def choose():
+            self._choose(field.label, field.options, row.get_selected(),
+                         lambda i: row.set_selected(i))
+
+        self._handlers[row] = Handler(select=choose, adjust=adjust, reset=reset)
         return row
+
+    def _choose(self, title: str, options, current: int,
+                done: Callable[[int], None]) -> None:
+        """A on a choice: the options as a list to pick from, the current one
+        marked -- what a drop-down is, in a form the pad can walk. A
+        drop-down's own popover is a separate surface the pad's row-to-row
+        navigation does not reach; stepping to the next option on every
+        press, which is what A did first, was reported as wrong."""
+        dialog = Adw.AlertDialog(heading=title)
+        # Added last-first: a narrow alert dialog stacks its responses with
+        # the last added on top, and a list should read top to bottom.
+        for i, (_value, label) in reversed(list(enumerate(options))):
+            dialog.add_response(str(i), label)
+        dialog.set_response_appearance(str(current), Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response(str(current))
+        dialog.set_close_response(str(current))
+        dialog.set_prefer_wide_layout(False)
+        dialog.connect("response", lambda _d, r: done(int(r)))
+        self._present(dialog)
 
     def _quietly(self, change: Callable[[], None]) -> None:
         self._updating = True
