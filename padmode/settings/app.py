@@ -37,6 +37,7 @@ from .. import config  # noqa: E402
 from ..actions.builtin import ACTIONS  # noqa: E402
 from . import model  # noqa: E402
 from .link import DaemonLink  # noqa: E402
+from .service import Service  # noqa: E402
 
 log = logging.getLogger("padmode.settings")
 
@@ -110,13 +111,15 @@ class Window(Adw.ApplicationWindow):
         view.set_content(self.stack)
 
         self.pages: list[tuple[str, Callable[[], Adw.PreferencesPage]]] = [
+            ("general", self._general_page),
             ("buttons", self._buttons_page),
             ("feel", self._feel_page),
             ("apps", self._apps_page),
             ("steam", self._steam_page),
         ]
-        self._titles = {"buttons": ("Buttons", "input-gaming-symbolic"),
-                        "feel": ("Feel", "preferences-system-symbolic"),
+        self._titles = {"general": ("General", "emblem-system-symbolic"),
+                        "buttons": ("Buttons", "input-gaming-symbolic"),
+                        "feel": ("Feel", "input-mouse-symbolic"),
                         "apps": ("Apps", "view-app-grid-symbolic"),
                         "steam": ("Steam", "applications-games-symbolic")}
         for name, build in self.pages:
@@ -419,12 +422,29 @@ class Window(Adw.ApplicationWindow):
         if self.session.problem:
             self._banner("Can't apply yet: " + self.session.problem, None, None)
         elif not self.link.connected and not self._connect_quietly():
-            self._banner("padmode is not running — changes are saved, and "
-                         "used when it starts", None, None)
+            service = self.session.service
+            if service is not None and service.running():
+                # Running, but no socket: a padmode from before the settings
+                # window, still in memory after an update.
+                self._banner("padmode is running but can't hear this window — "
+                             "restart it to use these settings", "Restart",
+                             self._restart_and_hold)
+            else:
+                self._banner("padmode is not running — changes are saved, and "
+                             "used when it starts", None, None)
         elif not self._pad_held and self._let_go:
             self._banner("The pad is free again.", "Use the pad", self.hold)
         else:
             self.banner.set_revealed(False)
+
+    def _restart_and_hold(self) -> None:
+        error = self.session.service.start(restart=True)
+        if error:
+            self.toast(f"Could not restart padmode: {error}", 5)
+            return
+        # The socket appears once the new daemon is up; give it a moment.
+        GLib.timeout_add(1500, lambda: (self.hold(), self.changed("general"),
+                                        False)[2])
 
     def _connect_quietly(self) -> bool:
         return self._connect()
@@ -609,6 +629,60 @@ class Window(Adw.ApplicationWindow):
         self.changed("buttons")
 
     # -- pages ---------------------------------------------------------
+    def _general_page(self) -> Adw.PreferencesPage:
+        page = Adw.PreferencesPage()
+        group = Adw.PreferencesGroup(title="padmode")
+        service = self.session.service
+        if service is None or self.session.autostart_saved is None:
+            group.add(Adw.ActionRow(
+                title="padmode isn't installed as a service",
+                subtitle="Run install.sh to have it start with your session, "
+                         "or start it by hand with padmode run"))
+            page.add(group)
+            return page
+
+        switch = Adw.SwitchRow(title="Start padmode when you log in",
+                               subtitle="Takes effect when you press Apply",
+                               active=bool(self.session.autostart))
+
+        def toggled(*_):
+            if not self._updating:
+                self.session.set_autostart(switch.get_active())
+                self.changed()
+
+        switch.connect("notify::active", toggled)
+
+        def reset():
+            self.session.set_autostart(bool(self.session.autostart_saved))
+            self._quietly(lambda: switch.set_active(bool(self.session.autostart)))
+            self.changed()
+
+        self._handlers[switch] = Handler(
+            select=lambda: switch.set_active(not switch.get_active()),
+            adjust=lambda d: (switch.set_active(d > 0), True)[1], reset=reset)
+        group.add(switch)
+
+        running = service.running()
+        status = Adw.ActionRow(
+            title="Running" if running else "Not running",
+            subtitle="The pad does what these settings say" if running else
+                     "Nothing reads the pad until it starts")
+        button = Gtk.Button(label="Restart" if running else "Start",
+                            valign=Gtk.Align.CENTER)
+
+        def start(_b=None):
+            error = service.start(restart=running)
+            self.toast(f"Could not start padmode: {error}" if error else
+                       ("padmode restarted" if running else "padmode started"), 4)
+            GLib.timeout_add(1500, lambda: (self.changed("general"), False)[1])
+
+        button.connect("clicked", start)
+        status.add_suffix(button)
+        status.set_activatable_widget(button)
+        group.add(status)
+        page.add(group)
+        return page
+
     def _buttons_page(self) -> Adw.PreferencesPage:
         page = Adw.PreferencesPage()
         s = self.session
@@ -1054,7 +1128,7 @@ class App(Adw.Application):
             Gdk.Display.get_default(), provider,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         try:
-            session = model.Session(self.args.config)
+            session = model.Session(self.args.config, service=Service())
         except model.EditError as exc:
             dialog = Adw.AlertDialog(
                 heading="The config file can't be edited here",
@@ -1101,7 +1175,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="padmode settings")
     parser.add_argument("-c", "--config", type=lambda p: __import__("pathlib").Path(p))
     parser.add_argument("-v", "--verbose", action="store_true")
-    parser.add_argument("--page", choices=["buttons", "feel", "apps", "steam"])
+    parser.add_argument("--page", choices=["general", "buttons", "feel", "apps", "steam"])
     parser.add_argument("--screenshot", help=argparse.SUPPRESS)
     parser.add_argument("--focus-rows", type=int, default=0, help=argparse.SUPPRESS)
     parser.add_argument("--screenshot-delay", type=float, default=1.5,

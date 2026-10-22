@@ -32,8 +32,9 @@
 - **Library metadata** — generate Pegasus collections from Heroic and Steam,
   cover art included.
 - **Unlock with the pad** — type your password at the lock screen *(opt-in)*.
-- **Settings window** — rebind buttons, tune the feel and manage your apps,
-  all from the pad: Guide + R3.
+- **Settings window** — rebind buttons, tune the feel, manage your apps and
+  choose whether padmode starts at login, all from the pad: Guide + R3, or
+  search for it in your app menu.
 
 Not a distro and not a game frontend: padmode adds console behaviour to the
 system you already have, and stays out of the way the rest of the time.

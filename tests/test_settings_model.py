@@ -226,3 +226,63 @@ class LabelTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeSystemctl:
+    def __init__(self, enabled="enabled", fail=False):
+        self.state = enabled
+        self.fail = fail
+        self.calls = []
+
+    def __call__(self, argv, **kw):
+        import subprocess
+        verb = argv[2]
+        self.calls.append(verb)
+        if verb == "is-enabled":
+            code = 4 if self.state == "not-found" else (0 if self.state == "enabled" else 1)
+            return subprocess.CompletedProcess(argv, code, self.state + "\n", "")
+        if verb in ("enable", "disable"):
+            if self.fail:
+                return subprocess.CompletedProcess(argv, 1, "", "Access denied")
+            self.state = "enabled" if verb == "enable" else "disabled"
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(argv, 0, "active\n", "")
+
+
+class AutostartTest(Base):
+    def session(self, **kw):
+        from padmode.settings.service import Service
+        self.ctl = FakeSystemctl(**kw)
+        return Session(self.path, service=Service(run=self.ctl))
+
+    def test_pending_until_apply(self):
+        s = self.session()
+        self.assertTrue(s.autostart)
+        s.set_autostart(False)
+        self.assertTrue(s.dirty)
+        self.assertNotIn("disable", self.ctl.calls)
+        s.apply()
+        self.assertEqual(self.ctl.state, "disabled")
+        self.assertFalse(s.dirty)
+        self.assertEqual(self.path.read_text(), HAND_WRITTEN)  # file untouched
+
+    def test_discard_puts_it_back(self):
+        s = self.session(enabled="disabled")
+        s.set_autostart(True)
+        s.discard()
+        self.assertFalse(s.dirty)
+        self.assertFalse(s.autostart)
+
+    def test_no_service_no_switch(self):
+        s = self.session(enabled="not-found")
+        self.assertIsNone(s.autostart)
+        s.set_autostart(True)
+        self.assertFalse(s.dirty)
+
+    def test_systemctl_refusing_is_said(self):
+        s = self.session(fail=True)
+        s.set_autostart(False)
+        with self.assertRaises(ConfigError) as ctx:
+            s.apply()
+        self.assertIn("Access denied", str(ctx.exception))
+        self.assertTrue(s.dirty)

@@ -343,9 +343,13 @@ Logs go to the journal: `journalctl --user -u padmode -f`
 
 ## Settings window
 
-Hold **Guide** and press **R3**, choose *padmode settings* from your
-application menu, or run `padmode settings`. Four pages:
+Open it whichever way is nearest: hold **Guide** and press **R3**; search for
+*padmode settings* (or "gamepad", "controller") in your application launcher;
+use the desktop shortcut, if you let `install.sh` make one; or run
+`padmode settings`. Five pages:
 
+- **General** — whether padmode starts when you log in, whether it is
+  running, and a button to start or restart it.
 - **Buttons** — what each Guide combo does, desktop mode's buttons, and the
   unlock layout (stick dial or Xbox, one choice).
 - **Feel** — pointer and scroll speed, dead zone, curve, how far sticks and
@@ -372,7 +376,8 @@ To rebind, select a row and press the button you want — a stick direction
 works too. If that button already did something, the window tells you what it
 no longer does. Mouse and keyboard work everywhere as well.
 
-**Nothing is saved until you press Apply**, and padmode picks the change up
+**Nothing is saved until you press Apply** — start at login included — and
+padmode picks the change up
 straight away. A few settings — which pad to use, the window backend, turning
 unlock on or off — only take effect after a restart; the window says so and
 offers to restart padmode. Closing with unapplied changes asks whether to

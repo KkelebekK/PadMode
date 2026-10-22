@@ -22,6 +22,8 @@ HEROIC_SERVICE_UNIT="$UNIT_DIR/padmode-heroic.service"
 UDEV_RULE="/etc/udev/rules.d/99-padmode.rules"
 APPS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 DESKTOP_FILE="$APPS_DIR/io.github.KkelebekK.PadMode.Settings.desktop"
+DESKTOP_DIR="$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")"
+DESKTOP_SHORTCUT="$DESKTOP_DIR/padmode-settings.desktop"
 MIN_PYTHON="3.11"
 
 # Heroic keeps its library cache in one of two places, depending on whether it
@@ -162,7 +164,12 @@ $(bold "Manual installation")
    \$HOME/.var/app/com.heroicgameslauncher.hgl/config/heroic/store_cache
    instead. Or just run 'padmode metadata heroic' by hand.)
 
-6. Check it:
+6. Optional -- a desktop shortcut to the settings window:
+
+   cp "$DESKTOP_FILE" "$DESKTOP_SHORTCUT"
+   chmod +x "$DESKTOP_SHORTCUT"
+
+7. Check it:
 
    padmode devices
    systemctl --user status padmode.service
@@ -273,11 +280,32 @@ install_heroic() {
     fi
 }
 
+install_shortcut() {
+    bold "6. Desktop shortcut (optional)"
+    echo "   The settings window is in your application menu and its search"
+    echo "   already, and Guide + R3 opens it. This also puts an icon on the"
+    echo "   desktop. Writes: $DESKTOP_SHORTCUT"
+    if [ ! -f "$DESKTOP_FILE" ]; then
+        echo "   skipped -- the menu entry from step 1 is missing"
+        return
+    fi
+    if confirm "   Add a desktop shortcut?"; then
+        mkdir -p "$DESKTOP_DIR"
+        cp "$DESKTOP_FILE" "$DESKTOP_SHORTCUT"
+        # Desktops only launch shortcuts that are marked executable.
+        chmod +x "$DESKTOP_SHORTCUT"
+        echo "   done"
+    else
+        echo "   skipped"
+    fi
+}
+
 uninstall() {
     bold "Uninstalling padmode"
     systemctl --user disable --now padmode.service 2>/dev/null || true
     systemctl --user disable --now padmode-heroic.path 2>/dev/null || true
-    rm -f "$UNIT" "$BIN" "$HEROIC_PATH_UNIT" "$HEROIC_SERVICE_UNIT" "$DESKTOP_FILE"
+    rm -f "$UNIT" "$BIN" "$HEROIC_PATH_UNIT" "$HEROIC_SERVICE_UNIT" "$DESKTOP_FILE" \
+        "$DESKTOP_SHORTCUT"
     rm -rf "${LIB_DIR:?}/padmode"
     systemctl --user daemon-reload 2>/dev/null || true
     echo "removed the service, launcher and package"
@@ -315,6 +343,7 @@ main() {
     install_group
     install_service
     install_heroic
+    install_shortcut
 
     echo
     bold "Done."

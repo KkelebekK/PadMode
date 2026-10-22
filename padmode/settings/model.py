@@ -240,8 +240,15 @@ XBOX_UNLOCK = {
 class Session:
     """The config file as the window is editing it."""
 
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, service=None) -> None:
         self.path = path or config.default_path()
+        #: The systemd service (:class:`padmode.settings.service.Service`), or
+        #: None to leave it alone -- the tests, and padmode run by hand.
+        self.service = service
+        #: Start at login: what it is, and what Apply will make it. None when
+        #: there is no service to switch.
+        self.autostart_saved = service.autostart() if service is not None else None
+        self.autostart = self.autostart_saved
         try:
             text = self.path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -259,7 +266,12 @@ class Session:
 
     @property
     def dirty(self) -> bool:
-        return self.doc.text != self.saved
+        return self.doc.text != self.saved or self.autostart != self.autostart_saved
+
+    def set_autostart(self, on: bool) -> None:
+        """Pending, like every other change: Apply makes it so."""
+        if self.autostart_saved is not None:
+            self.autostart = on
 
     # -- plain fields --------------------------------------------------
     def value(self, field: Field) -> Any:
@@ -387,15 +399,25 @@ class Session:
 
     # -- Apply ---------------------------------------------------------
     def apply(self) -> config.Config:
-        """Write the file. Raises :class:`padmode.config.ConfigError` if the
-        daemon would refuse it; nothing is written then."""
-        cfg = config.write(self.doc.text, self.path)
-        self.saved = self.doc.text
-        self.config = cfg
-        return cfg
+        """Write the file, and switch start-at-login if that changed.
+
+        Raises :class:`padmode.config.ConfigError` if the daemon would refuse
+        the file -- nothing is written or switched then -- or if systemctl
+        refuses, after the file is safely written.
+        """
+        if self.doc.text != self.saved:
+            self.config = config.write(self.doc.text, self.path)
+            self.saved = self.doc.text
+        if self.autostart != self.autostart_saved and self.service is not None:
+            error = self.service.set_autostart(bool(self.autostart))
+            if error:
+                raise config.ConfigError(f"could not change start at login: {error}")
+            self.autostart_saved = self.autostart
+        return self.config
 
     def discard(self) -> None:
         self.doc = Document(self.saved)
+        self.autostart = self.autostart_saved
         self._settle()
 
     def _settle(self) -> None:
