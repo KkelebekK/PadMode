@@ -230,6 +230,28 @@ The known hard part: **the stdlib reads TOML but cannot write it.** Writing
 the file back without losing the user's comments and layout needs either a
 small writer for our own schema, or edits made in place. Decide that first.
 
+**Decided with the maintainer, 2026-10-22:**
+
+- **Edits are made in place.** A changed value is rewritten on its own line; a
+  missing key is appended to its table, a missing table to the end of the
+  file. Comments, order and blank lines the user wrote survive. Our schema is
+  numbers, strings, booleans and string lists, which is what makes a writer
+  this narrow honest. Not a separate `gui.toml` (one setting in two places),
+  not a regenerated file (the user's comments lost).
+- **An ordinary window, built to be driven by the keyboard.** Large rows,
+  arrow-key navigation, Enter and Escape meaning what they always mean — so in
+  desktop mode the pad drives it with no extra plumbing (d-pad = arrows,
+  A = click, Start = Enter, Select = Esc), and a mouse works too. Not a
+  full-screen console menu: that would need the daemon to hand the pad to the
+  window, which is a second input path for one feature.
+- **First version covers everything users edit by hand today:** bindings
+  (Guide combos, desktop mode, unlock — the Xbox layout one choice away),
+  feel (pointer and scroll speed, dead zone, curve, keyboard size and edge),
+  overlays and the frontend, and the Steam ignore list.
+- **Nothing is saved until Apply.** Apply writes the file and the daemon picks
+  it up at once. Closing with unapplied changes asks: apply, discard and close,
+  or go back.
+
 ---
 
 ## 4. Code conventions
