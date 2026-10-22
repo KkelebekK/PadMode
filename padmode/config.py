@@ -36,6 +36,7 @@ DEFAULT_BINDINGS: dict[str, str] = {
     "X": "audio.toggle_mute",
     "DPAD_UP": "audio.volume_up",
     "DPAD_DOWN": "audio.volume_down",
+    "R3": "settings",
 }
 
 DEFAULT_MODIFIER = "GUIDE"
@@ -75,6 +76,27 @@ OSK_BINDING = "osk"
 def is_osk(binding: Binding) -> bool:
     """True if this binding means "show the on-screen keyboard"."""
     return binding == OSK_BINDING
+
+
+#: Marks a binding as "open the settings window" (v0.8). Guide + R3 by
+#: default. A window, not an action: the daemon starts it and the window asks
+#: for the pad itself once it is up.
+SETTINGS_BINDING = "settings"
+
+
+def is_settings(binding: Binding) -> bool:
+    """True if this binding means "open the settings window"."""
+    return binding == SETTINGS_BINDING
+
+
+def is_special(binding: Binding) -> bool:
+    """True for a binding the daemon acts on itself rather than running.
+
+    Overlays, the frontend, the keyboard and the settings window: none of them
+    is a command, so none should be checked for an installed binary.
+    """
+    return (overlay_name(binding) is not None or is_frontend(binding)
+            or is_osk(binding) or is_settings(binding))
 
 #: Desktop-mode defaults: gamepad drives the pointer and keyboard.
 DEFAULT_DESKTOP_BINDINGS: dict[str, str] = {
@@ -500,6 +522,18 @@ def parse(data: dict[str, Any]) -> Config:
             cfg.osk,
         ),
     )
+    # The settings default gives way to a desktop.enter the user chose on
+    # purpose. It arrived in v0.8, after people had configs: without this,
+    # every one with enter = "R3" would have become a startup failure. Only
+    # that default -- the others collide and say so below, as they always did,
+    # and so does a binding the user wrote on that button themselves.
+    raw_enter = _table(data, "desktop").get("enter")
+    enter = buttons.canonical(raw_enter) if isinstance(raw_enter, str) else None
+    written = {buttons.canonical(k) for k in _table(data, "bindings")}
+    if (enter in cfg.bindings and enter not in written
+            and DEFAULT_BINDINGS.get(enter) == SETTINGS_BINDING):
+        cfg = replace(cfg, bindings={k: v for k, v in cfg.bindings.items()
+                                     if k != enter})
     cfg = replace(cfg, desktop=_parse_desktop(_table(data, "desktop"), cfg))
     cfg = replace(cfg, unlock=_parse_unlock(_table(data, "unlock"), cfg.modifier))
     return cfg
@@ -915,6 +949,8 @@ def _validate_binding(
     """A binding is an action id, an overlay, the frontend, the keyboard, or
     an argv list."""
     if isinstance(value, str):
+        if is_settings(value):
+            return value
         if is_osk(value):
             if osk is not None and not osk.enabled:
                 raise ConfigError(
@@ -944,6 +980,7 @@ def _validate_binding(
                 known.append(FRONTEND_BINDING)
             if osk is None or osk.enabled:
                 known.append(OSK_BINDING)
+            known.append(SETTINGS_BINDING)
             raise ConfigError(
                 f"bindings.{name}: unknown action {value!r}. "
                 f"Known: {', '.join(known)}"

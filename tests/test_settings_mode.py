@@ -198,6 +198,22 @@ class DecideTest(unittest.TestCase):
         self.assertEqual(settings_scroll_steps(self.state, self.cfg, 1 / 60), 0)
 
 
+class OpenSettingsTest(unittest.TestCase):
+    def test_guide_r3_asks_for_the_window(self):
+        cfg, state = parse({}), State()
+        decide(KEY, GUIDE, 1, state, cfg)
+        d = decide(KEY, code("R3"), 1, state, cfg)
+        self.assertTrue(d.open_settings)
+        self.assertIs(state.mode, Mode.GUIDE_HELD)  # the window takes the pad
+
+    def test_rebindable(self):
+        cfg = parse({"bindings": {"R3": False, "START": "settings"}})
+        state = State()
+        decide(KEY, GUIDE, 1, state, cfg)
+        self.assertFalse(decide(KEY, code("R3"), 1, state, cfg).open_settings)
+        self.assertTrue(decide(KEY, code("START"), 1, state, cfg).open_settings)
+
+
 # -- the daemon, against fakes ----------------------------------------------
 class FakeControl:
     """Requests handed out one WAKE at a time; what was sent, recorded."""

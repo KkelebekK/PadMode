@@ -20,6 +20,8 @@ from __future__ import annotations
 import enum
 import logging
 import math
+import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 
@@ -31,6 +33,8 @@ from .config import (
     Overlay,
     is_frontend,
     is_osk,
+    is_settings,
+    is_special,
     overlay_name,
 )
 from . import config as config_module
@@ -300,6 +304,9 @@ class Decision:
     #: Go back to the configured frontend. Not a mode change: the pad is handed
     #: *back*, so this only says where focus should end up once it is free.
     frontend: bool = False
+    #: Start the settings window. Not a mode change either: the window asks
+    #: for the pad once it is up, so nothing depends on it starting.
+    open_settings: bool = False
     #: Zero or more things to do to the on-screen keyboard.
     osk: tuple[OskOp, ...] = ()
     #: Key codes to tap on the unlock keypad, in order. Only ever set in
@@ -316,6 +323,7 @@ class Decision:
             or self.mode
             or self.overlay
             or self.frontend
+            or self.open_settings
             or self.osk
             or self.keypad
             or self.settings
@@ -431,6 +439,8 @@ def decide(
         state.mode = Mode.DESKTOP
         state.reset_inputs()
         return Decision(mode=Mode.DESKTOP, osk=(OskOp("open"),))
+    if is_settings(binding):
+        return Decision(open_settings=True)
     if is_frontend(binding):
         # Deliberately no mode change: the frontend drives itself from the pad,
         # so going home means giving the device back rather than taking it
@@ -1274,7 +1284,7 @@ class Daemon:
         self._runner.preflight({
             name: binding
             for name, binding in self._config.bindings.items()
-            if overlay_name(binding) is None and not is_frontend(binding)
+            if not is_special(binding)
         })
         self._preflight_overlays()
         self._start_lock()
@@ -1429,6 +1439,22 @@ class Daemon:
                  self._config.modifier)
         self._control.send(client, {"event": "held"})
 
+    def _open_settings(self) -> None:
+        """Start the settings window, or bring the running one forward.
+
+        Always a fresh ``python -m padmode.settings``: it is a single-instance
+        GTK application, so a second start just activates the first and exits.
+        It asks for the pad itself, once it has a window to drive -- by which
+        time Guide is up and the pad free again.
+        """
+        argv = [sys.executable, "-m", "padmode.settings"]
+        try:
+            subprocess.Popen(argv, stdin=subprocess.DEVNULL, start_new_session=True)
+        except OSError as exc:
+            log.warning("could not start the settings window: %s", exc)
+            return
+        log.info("settings window requested")
+
     def _settings_mode(self) -> bool:
         """The window has the pad -- directly, or under a keyboard it opened."""
         mode = self._state.mode
@@ -1505,7 +1531,7 @@ class Daemon:
         if new.bindings != old.bindings:
             self._runner.preflight({
                 name: binding for name, binding in new.bindings.items()
-                if overlay_name(binding) is None and not is_frontend(binding)
+                if not is_special(binding)
             })
         log.info("config reloaded%s",
                  f" ({', '.join(restart)} need a restart)" if restart else "")
@@ -1555,6 +1581,8 @@ class Daemon:
             self._runner.run(decision.binding)
         if decision.frontend:
             self._go_home()
+        if decision.open_settings:
+            self._open_settings()
         for op in decision.virtual:
             self._apply(op)
         for osk_op in decision.osk:

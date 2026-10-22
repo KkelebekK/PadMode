@@ -654,6 +654,13 @@ class TestDesktopConfig(unittest.TestCase):
             parse({"desktop": {"enter": "RB"}})  # RB is media.next by default
         self.assertIn("also bound", str(ctx.exception))
 
+    def test_enter_on_r3_still_works_after_the_settings_default(self):
+        cfg = parse({"desktop": {"enter": "R3"}})
+        self.assertEqual(cfg.desktop.enter, "R3")
+        self.assertNotIn("R3", cfg.bindings)
+        with self.assertRaises(ConfigError):  # written by hand, it collides
+            parse({"desktop": {"enter": "R3"}, "bindings": {"R3": "settings"}})
+
     def test_enter_cannot_be_the_modifier(self):
         with self.assertRaises(ConfigError):
             parse({"desktop": {"enter": "GUIDE"}})
