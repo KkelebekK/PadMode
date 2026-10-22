@@ -238,6 +238,23 @@ class Window(Adw.ApplicationWindow):
             if self.link.connected:
                 self.link.send({"op": "release"})
 
+    _reconnect_id: int | None = None
+
+    def _start_reconnect(self) -> None:
+        if self._reconnect_id is None:
+            self._reconnect_id = GLib.timeout_add(1000, self._try_reconnect)
+
+    def _try_reconnect(self) -> bool:
+        if not self.link.connected and not self._connect():
+            return True   # not back yet
+        self._reconnect_id = None
+        if self.is_active() and not self._let_go:
+            self.link.send({"op": "hold"})
+        self._refresh_status()
+        if self.stack.get_visible_child_name() == "general":
+            self.changed("general")   # Running / Not running
+        return False
+
     def hold(self) -> None:
         self._let_go = False
         if self._connect():
@@ -247,9 +264,16 @@ class Window(Adw.ApplicationWindow):
     def _on_link(self, _fd, _cond) -> bool:
         events = self.link.read()
         if events is None:
+            # The daemon went away -- restarted from this window, stopped,
+            # updated, crashed. Keep knocking until one is back, then take the
+            # pad again: after a Restart the window was left deaf to the pad
+            # while padmode itself ran on (reported).
             self._watch = None
+            self._pad_held = False
+            self.hints.add_css_class("idle")
             self._stop_capture()
             self._refresh_status()
+            self._start_reconnect()
             return False
         for event in events:
             self._on_event(event)
@@ -585,9 +609,8 @@ class Window(Adw.ApplicationWindow):
         if error:
             self.toast(f"Could not restart padmode: {error}", 5)
             return
-        # The socket appears once the new daemon is up; give it a moment.
-        GLib.timeout_add(1500, lambda: (self.hold(), self.changed("general"),
-                                        False)[2])
+        # The socket appears once the new daemon is up: keep trying.
+        self._start_reconnect()
 
     def _connect_quietly(self) -> bool:
         return self._connect()
@@ -916,6 +939,7 @@ class Window(Adw.ApplicationWindow):
             error = service.start(restart=running)
             self.toast(f"Could not start padmode: {error}" if error else
                        ("padmode restarted" if running else "padmode started"), 4)
+            self._start_reconnect()   # a started or restarted daemon: take the pad
             GLib.timeout_add(1500, lambda: (self.changed("general"), False)[1])
 
         button.connect("clicked", start)
