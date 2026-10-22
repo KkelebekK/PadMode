@@ -286,8 +286,10 @@ Page, Start Apply, Y Default, Guide Let go). Five themes, chosen in the window
 (the maintainer's usual), `night`, `green`, `amber`. A theme is a palette *and*
 a shape: corner radius and how the focused row shows — fill, ring or bar
 (`settings/themes.py`). Colour was one aesthetic decision of several;
-typography, density, depth, iconography and motion are still to be decided
-one at a time.
+the rest are decided one at a time. **Typography: Nunito** (rounded, friendly,
+Switch-like; heavy headings) — shipped with the window under the OFL rather
+than expected on the system. Density, depth, iconography, motion and sound are
+still to be decided.
 
 How it is built, in order — each step usable and tested before the next:
 
