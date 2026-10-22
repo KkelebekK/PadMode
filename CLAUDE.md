@@ -238,12 +238,29 @@ small writer for our own schema, or edits made in place. Decide that first.
   numbers, strings, booleans and string lists, which is what makes a writer
   this narrow honest. Not a separate `gui.toml` (one setting in two places),
   not a regenerated file (the user's comments lost).
-- **An ordinary window, built to be driven by the keyboard.** Large rows,
-  arrow-key navigation, Enter and Escape meaning what they always mean — so in
-  desktop mode the pad drives it with no extra plumbing (d-pad = arrows,
-  A = click, Start = Enter, Select = Esc), and a mouse works too. Not a
-  full-screen console menu: that would need the daemon to hand the pad to the
-  window, which is a second input path for one feature.
+- **An ordinary window that the pad drives natively** — not through desktop
+  mode's pointer. *Revised the same day:* the first answer was "drive it in
+  desktop mode, for free", on the grounds that native pad support needs the
+  daemon to hand the pad to the window. The maintainer asked why not native;
+  press-to-assign needs exactly that channel anyway, and the keyboard already
+  proved the pattern (the daemon owns the pad, digests sticks into steps, the
+  renderer only hears steps). So: a `SETTINGS` pad mode, the OSK's twin.
+  The window stays an ordinary window, not full screen; the mouse and the
+  keyboard still work, because pad, keys and mouse all move the same focus.
+
+  | Pad | In the settings window |
+  |---|---|
+  | D-pad / left stick | Move focus (repeats while held, the keyboard's clock) |
+  | A | Select, toggle, or open the on-screen keyboard on a text field |
+  | B | Back; at the top, close (asking if anything is unapplied) |
+  | LB / RB | Previous / next page |
+  | Start | Apply |
+  | Y | Reset the focused setting to its default |
+  | Right stick | Scroll a long list |
+  | Guide | Let go of the pad; the window stays open for the mouse |
+
+  Text fields hand over to the on-screen keyboard and come back to `SETTINGS`
+  when it closes — `osk_return` already does that for desktop mode.
 - **First version covers everything users edit by hand today:** bindings
   (Guide combos, desktop mode, unlock — the Xbox layout one choice away),
   feel (pointer and scroll speed, dead zone, curve, keyboard size and edge),
@@ -256,9 +273,9 @@ small writer for our own schema, or edits made in place. Decide that first.
   included. Picking from a list stays as the fallback. The daemon holds the
   pad in desktop mode, so it is the daemon that reports the press.
 - **Guide + R3 opens it**, as a default binding (`R3 = "settings"`) that can be
-  rebound like any other. Opening it also enters desktop mode, so the pad can
-  drive it straight away. An application-menu entry and `padmode settings`
-  exist regardless.
+  rebound like any other, and the pad is the window's at once. Opened from the
+  application menu or `padmode settings` instead, the window asks the daemon
+  for the pad itself.
 
 How it is built, in order — each step usable and tested before the next:
 
@@ -267,7 +284,9 @@ How it is built, in order — each step usable and tested before the next:
    written.
 2. A control socket on the daemon (`$XDG_RUNTIME_DIR/padmode.sock`, line JSON
    like the keyboard's pipe): `reload` for Apply, `capture` for
-   press-to-assign. A reload that fails keeps the old config and says why.
+   press-to-assign, and the `SETTINGS` mode — taking the pad, sending
+   navigation steps, letting go. A reload that fails keeps the old config and
+   says why.
 3. The window (`python -m padmode.settings`, GTK4 like the keyboard, its own
    process): pages, Apply, the unapplied-changes prompt, keyboard navigation.
 4. The four pages: bindings, feel, overlays and frontend, Steam ignore list.
