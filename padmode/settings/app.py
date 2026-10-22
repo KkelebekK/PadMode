@@ -20,6 +20,7 @@ controller away from it.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import logging
 import shlex
 import subprocess
@@ -50,7 +51,19 @@ SCROLL_STEP = 48
 #: Long enough for the squash and stretch to read (motion.py).
 TAB_SLIDE_MS = 380
 
+#: Nunito, shipped with the window under the OFL (fonts/OFL.txt): the
+#: typography decided with the maintainer, and not something to expect
+#: installed. One variable file covers every weight.
+FONT_FILE = Path(__file__).resolve().parent / "fonts" / "Nunito[wght].ttf"
+
 CSS = b"""
+.padmode-settings { font-family: "Nunito"; }
+.padmode-settings .heading, .padmode-settings .title-1,
+.padmode-settings .title-2, .padmode-settings .title-3 { font-weight: 800; }
+.padmode-settings preferencesgroup .heading { font-size: 1.35em; }
+.padmode-settings row .title { font-weight: 600; }
+.pm-tabs .tab label { font-weight: 700; }
+.pm-hints label { font-weight: 600; }
 .padmode-settings .pm-rail { background-color: var(--pm-rail); padding: 14px 10px; }
 .padmode-settings .pm-rail .pm-name { font-weight: bold; font-size: 1.15em;
   margin: 2px 10px 14px; }
@@ -64,7 +77,7 @@ CSS = b"""
 .padmode-settings row .title { font-size: 1.07em; }
 .padmode-settings .capturing { box-shadow: inset 0 0 0 2px var(--accent-bg-color); }
 .pm-badge { min-width: 24px; min-height: 24px; padding: 0 4px; border-radius: 12px;
-  font-weight: bold; font-size: 0.85em; color: var(--pm-badge-fg); }
+  font-weight: 800; font-size: 0.85em; color: var(--pm-badge-fg); }
 .pm-badge.pm-a { background-color: var(--pm-a); }
 .pm-badge.pm-b { background-color: var(--pm-b); }
 .pm-badge.pm-x { background-color: var(--pm-x); }
@@ -1338,6 +1351,20 @@ def _digit_order(value) -> int:
         int(value) - 1) % 10 if str(value).isdigit() else 13)
 
 
+def _load_font() -> None:
+    """Make Nunito available to this process only. Nothing is installed: a
+    missing or refused file just leaves the system's own font in place."""
+    gi.require_version("PangoCairo", "1.0")
+    from gi.repository import PangoCairo
+
+    font_map = PangoCairo.FontMap.get_default()
+    try:
+        if not font_map.add_font_file(str(FONT_FILE)):
+            log.debug("could not load %s; using the system font", FONT_FILE)
+    except (AttributeError, GLib.Error) as exc:   # Pango before 1.56
+        log.debug("no app fonts here (%s); using the system font", exc)
+
+
 def _restart_daemon() -> None:
     subprocess.Popen(["systemctl", "--user", "restart", "padmode.service"],
                      stdin=subprocess.DEVNULL)
@@ -1359,6 +1386,7 @@ class App(Adw.Application):
             self.window.present()
             return
         Adw.Application.do_activate(self)
+        _load_font()
         provider = Gtk.CssProvider()
         provider.load_from_data(CSS + b"\n" + themes.all_css().encode())
         Gtk.StyleContext.add_provider_for_display(
